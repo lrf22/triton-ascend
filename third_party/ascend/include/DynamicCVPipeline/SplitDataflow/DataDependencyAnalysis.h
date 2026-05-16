@@ -132,7 +132,14 @@ private:
                                                 int producerBlockId,
                                                 int consumerBlockId);
 
-  bool isControlFlowOp(mlir::Operation *op);
+    bool isControlFlowOp(mlir::Operation *op);
+    bool isValidTensorForDependency(mlir::Value value);
+    bool isOuterOpArg(mlir::Value value);
+    int getAvaliableBlockId();
+    void processIterArgDependencies();
+    void processIterArgUsers(scf::ForOp forOp, mlir::BlockArgument iterArg,
+                             llvm::StringRef initCoreType, int iterArgIndex,
+                             DataDependencyInfo &info);
 
   mlir::ModuleOp module;
 };

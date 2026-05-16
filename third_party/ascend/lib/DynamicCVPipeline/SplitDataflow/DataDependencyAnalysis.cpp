@@ -24,6 +24,7 @@
 #include "ascend/include/DynamicCVPipeline/Common/MemoryEffectsTracker.h"
 
 #include "mlir/Analysis/AliasAnalysis.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Transforms/DialectConversion.h"
@@ -83,6 +84,30 @@ bool DataDependencyAnalysisPass::isControlFlowOp(mlir::Operation *op)
     if (!op)
         return false;
     return isa<scf::ForOp>(op) || isa<scf::IfOp>(op) || isa<scf::WhileOp>(op) || isa<scf::YieldOp>(op);
+}
+
+// Helper: Check if value is a valid tensor for dependency analysis
+// Returns true if value is TensorType and not defined by EmptyOp/FillOp
+bool DataDependencyAnalysisPass::isValidTensorForDependency(mlir::Value value)
+{
+    if (!dyn_cast<mlir::TensorType>(value.getType())) {
+        return false;
+    }
+    Operation *defOp = value.getDefiningOp();
+    if (defOp && isa<tensor::EmptyOp, linalg::FillOp>(defOp)) {
+        return false;
+    }
+    return true;
+}
+
+// Helper: Check if value is a arg
+bool DataDependencyAnalysisPass::isOuterOpArg(mlir::Value value)
+{
+    if (auto blockArg = mlir::dyn_cast<mlir::BlockArgument>(value)) {
+        mlir::Block *ownerBlock = blockArg.getOwner();
+        return true;
+    }
+    return false;
 }
 
 // Helper: Build and record BlockInfo
@@ -184,6 +209,156 @@ void DataDependencyAnalysisPass::collectDepInfo(mlir::Value depvalue, Dependency
     dependencies.push_back(depInfo);
 }
 
+int DataDependencyAnalysisPass::getAvaliableBlockId()
+{
+    int maxBlockId = -1;
+    module.walk([&](Operation *op) {
+        int currentId = getSsbufferBlockId(op);
+        if (currentId > maxBlockId) {
+            maxBlockId = currentId;
+        }
+    });
+    return maxBlockId + 1;
+}
+
+// Checks if any user of the iterArg has a different core type than the
+// init value's core type. If such users exist, it creates a producer block at the
+// beginning of the for loop body and records dependencies for synchronization.
+void DataDependencyAnalysisPass::processIterArgUsers(scf::ForOp forOp, mlir::BlockArgument iterArg,
+    llvm::StringRef initCoreType, int iterArgIndex, DataDependencyInfo &info)
+{
+    auto &v2cDependencies = info.getV2CDependencies();
+    auto &c2vDependencies = info.getC2VDependencies();
+
+    // Traverse all users and check if any user has a different core type than initCoreType
+    bool hasDiffCoreTypeUser = false;
+    llvm::SmallVector<mlir::Operation *> diffUsers;
+
+    for (mlir::Operation *user : iterArg.getUsers()) {
+        // Skip yield operations as they are loop terminators, not consumers
+        if (isa<scf::YieldOp>(user)) {
+            continue;
+        }
+        // Skip nested control flow operations as they require separate handling
+        if (isa<scf::ForOp, scf::WhileOp>(user)) {
+            LOG_DEBUG("warning: cannot process nested iterarg!");
+            continue;
+        }
+
+        auto userCoreType = getCoreTypeWithIndex(user, 0);
+        if (userCoreType != initCoreType && !userCoreType.empty()) {
+            hasDiffCoreTypeUser = true;
+            diffUsers.push_back(user);
+        }
+    }
+
+    // If all users have the same core type as initCoreType, no dependency recording needed
+    if (!hasDiffCoreTypeUser) {
+        return;
+    }
+
+    // If there are users with different core types, insert a const op at the beginning
+    // of the for loop body to serve as the producer block for synchronization
+    int newId = getAvaliableBlockId();
+    OpBuilder builder(forOp);
+    Block &bodyBlock = forOp.getRegion().front();
+    builder.setInsertionPointToStart(&bodyBlock);
+    Location loc = forOp.getLoc();
+    auto constOp = builder.create<arith::ConstantIntOp>(loc, 0, 32);
+    constOp->setAttr(kBlockIdAttr, IntegerAttr::get(IntegerType::get(builder.getContext(), 32), newId));
+    constOp->setAttr(kCoreTypeAttr, StringAttr::get(builder.getContext(), initCoreType));
+
+    // Record dependencies for each user with a different core type
+    for (auto &user : diffUsers) {
+        int userBlockId = getSsbufferBlockId(user);
+        if (userBlockId == -1) {
+            LOG_DEBUG("Warning: User block ID not found for iterArg user.\n");
+            continue;
+        }
+
+        // Determine dependency type based on initCoreType
+        DependencyType depType;
+        if (initCoreType == "VECTOR") {
+            depType = DependencyType::VectorToCube;
+        } else if (initCoreType == "CUBE") {
+            depType = DependencyType::CubeToVector;
+        } else {
+            LOG_DEBUG("Warning: Unknown initCoreType: " << initCoreType << "\n");
+            continue;
+        }
+
+        // Record dependency
+        DependencyInfo depInfo;
+        depInfo.type = depType;
+        depInfo.value = iterArg;
+        depInfo.iniProducerBlockId = newId;
+        depInfo.iniConsumerBlockId = userBlockId;
+        depInfo.producerBlockId = newId;
+        depInfo.consumerBlockId = userBlockId;
+
+        if (depType == DependencyType::VectorToCube) {
+            v2cDependencies.push_back(depInfo);
+        } else {
+            c2vDependencies.push_back(depInfo);
+        }
+
+        LOG_DEBUG("Recorded iterArg dependency: " << initCoreType << " -> "
+            << (depType == DependencyType::VectorToCube ? "CUBE" : "VECTOR")
+            << ", producerBlockId=" << newId << ", consumerBlockId=" << userBlockId << "\n");
+    }
+}
+
+// Process iterArg dependencies for all scf.for operations in the module.
+// This function iterates through all for loops and checks each iterArg to determine
+// if there are cross-core-type data dependencies.
+void DataDependencyAnalysisPass::processIterArgDependencies()
+{
+    auto &info = getAnalysis<DataDependencyInfo>();
+    auto &v2cDependencies = info.getV2CDependencies();
+    auto &c2vDependencies = info.getC2VDependencies();
+
+    // Step1: Collect all scf.for operations in the module
+    llvm::SmallVector<scf::ForOp> forOps;
+    module.walk([&](scf::ForOp forOp) {
+        forOps.push_back(forOp);
+    });
+    LOG_DEBUG("Processing iterArg dependencies, found " << forOps.size() << " scf.for ops\n");
+
+    // Step2: Process each iterArg of each scf.for operation
+    for (scf::ForOp forOp : forOps) {
+        size_t numIterArgs = forOp.getInitArgs().size();
+
+        for (int iterArgIndex = 0; iterArgIndex < numIterArgs; ++iterArgIndex) {
+            mlir::Value initValue = forOp.getInits()[iterArgIndex];
+            // Skip non-tensor values as they don't require inter-core synchronization
+            if (!isValidTensorForDependency(initValue)) {
+                LOG_DEBUG("iterarg: "<< initValue <<"is not valid tensor for dependency!");
+                continue;
+            }
+
+            mlir::BlockArgument iterArg = forOp.getRegionIterArg(iterArgIndex);
+            mlir::Value yieldedValue = forOp.getYieldedValues()[iterArgIndex];
+
+            Operation *initDefOp = initValue.getDefiningOp();
+            if (!initDefOp) {
+                LOG_DEBUG("warning: cannot process nested iterarg!");
+                continue;
+            }
+            auto initDefResult = dyn_cast<mlir::OpResult>(initValue);
+            auto initCoreType = getCoreTypeWithIndex(initDefOp, initDefResult ? initDefResult.getResultNumber() : 0);
+            auto yieldCoreType = getCoreTypeWithIndex(forOp, iterArgIndex);
+
+            // Only process if init and yield have matching core types
+            // Mismatch indicates a more complex dependency pattern that requires special handling
+            if (initCoreType == yieldCoreType) {
+                processIterArgUsers(forOp, iterArg, initCoreType, iterArgIndex, info);
+            } else {
+                LOG_DEBUG("[warning] iterarg init core_type conflict with yield!!!!!!\n");
+            }
+        }
+    }
+}
+
 // Analyze V->C
 void DataDependencyAnalysisPass::analyzeExternalInputs(DataDependencyInfo &info)
 {
@@ -196,18 +371,14 @@ void DataDependencyAnalysisPass::analyzeExternalInputs(DataDependencyInfo &info)
             continue;
         LOG_DEBUG("Analyzing external inputs for Cube Block ID: " << id << "\n");
         for (mlir::Value input : blockInfo.inputs) {
-            // Check if input is a func.func blockarg.
-            if (auto arg = mlir::dyn_cast<mlir::BlockArgument>(input)) {
-                LOG_DEBUG("Warning: [v->c] Input value is a function parameter.\n");
-                continue;
-            }
             // Check if input is a value which can be produced by CUBE
-            if (!dyn_cast<mlir::TensorType>(input.getType())) {
-                LOG_DEBUG("Warning: [v->c] Input value is not TensorType\n");
+            if (!isValidTensorForDependency(input)) {
+                LOG_DEBUG("Warning: [v->c] Input value is not a valid tensor for dependency analysis.\n");
                 continue;
             }
-            if (isa<tensor::EmptyOp, linalg::FillOp>(input.getDefiningOp())) {
-                LOG_DEBUG("Warning: [v->c] Input value is defined by tensor::EmptyOp/linalg::FillOp.\n");
+            // Check if input is a blockarg.
+            if (isOuterOpArg(input)) {
+                LOG_DEBUG("Warning: [v->c] Input value is a function/scf parameter.\n");
                 continue;
             }
 
@@ -251,13 +422,9 @@ void DataDependencyAnalysisPass::analyzeExternalOutputs(DataDependencyInfo &info
             continue;
 
         for (mlir::Value output : blockInfo.outputs) {
-            // Check if input is a value which can be produced by VECTOR
-            if (!dyn_cast<mlir::TensorType>(output.getType())) {
-                LOG_DEBUG("Warning: ExternalOutput is not TensorType\n");
-                continue;
-            }
-            if (isa<tensor::EmptyOp, linalg::FillOp>(output.getDefiningOp())) {
-                LOG_DEBUG("Warning: [c->v] output value is defined by tensor::EmptyOp/linalg::FillOp.\n");
+            // Check if output is a value which can be produced by CUBE
+            if (!isValidTensorForDependency(output)) {
+                LOG_DEBUG("Warning: [c->v] Output value is not a valid tensor for dependency analysis.\n");
                 continue;
             }
 
@@ -435,11 +602,14 @@ void DataDependencyAnalysisPass::runOnOperation()
     // Step 1: Collect block information (populate blockInfoMap)
     createBlockInfoMap(info);
 
-    // Step 2: Analyze dependencies (populate v2c, c2v lists)
+    // Step 2: Analyze iter_args dependencies
+    processIterArgDependencies();
+
+    // Step 3: Analyze dependencies (populate v2c, c2v lists)
     analyzeExternalInputs(info);
     analyzeExternalOutputs(info);
 
-    // Step 3: Analyze memory dependencies (PIPE_S sync)
+    // Step 4: Analyze memory dependencies (PIPE_S sync)
     analyzeMemoryEffect(info);
 
     info.setValid(true);
