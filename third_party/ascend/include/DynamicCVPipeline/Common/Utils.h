@@ -63,6 +63,7 @@ inline constexpr CoreType fromStrCoreType(std::string_view s)
 CoreType getOpCoreType(Operation *op);
 std::optional<int64_t> getOpBlockId(Operation *op);
 llvm::LogicalResult verifyOpBlockId(Operation *op);
+int getAvailableBlockId(ModuleOp module);
 void setFallbackAttr(ModuleOp module);
 
 inline bool isCubeOp(Operation *op)
