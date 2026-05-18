@@ -226,6 +226,9 @@ static scf::IfOp createIfOpForBlock(OpBuilder &builder, Location loc, int blockI
 
   ifOp->setAttr("ssbuffer.if", builder.getI32IntegerAttr(blockId));
 
+  // notify npuir that of the scenario
+  ifOp->setAttr("matmul_limited_in_cube", builder.getUnitAttr());
+
   return ifOp;
 }
 

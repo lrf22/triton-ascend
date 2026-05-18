@@ -107,7 +107,7 @@ static bool isFloatOrInt(RankedTensorType tensorType)
 // 2. Whether matmul is guaranteed to execute: bool mayNotExec
 // 3. Outermost initial value: Value outerInVal
 // 4. Outermost for or if, i.e., where to insert if/else.
-Value searchInArgsChain(Value nextValueOfC, bool &argsLimitedInMatmul, bool &mayNotExec, Value &outerInVal)
+static Value searchInArgsChain(Value nextValueOfC, bool &argsLimitedInMatmul, bool &mayNotExec, Value &outerInVal)
 {
     if (outerInVal.getDefiningOp()) {
         return nextValueOfC;
@@ -148,7 +148,8 @@ Value searchInArgsChain(Value nextValueOfC, bool &argsLimitedInMatmul, bool &may
             auto userInBlock = CVPipeline::getAncestorInBlock(user, op->getBlock());
             if (userInBlock == op) {
                 continue;
-            } else if (auto yieldOp = dyn_cast<scf::YieldOp>(userInBlock)) {
+            }
+            if (auto yieldOp = dyn_cast<scf::YieldOp>(userInBlock)) {
                 argsLimitedInMatmul = (use.getOperandNumber() == argIdx);
             } else {
                 argsLimitedInMatmul = false;
@@ -181,13 +182,13 @@ Value searchInArgsChain(Value nextValueOfC, bool &argsLimitedInMatmul, bool &may
         LOG_DEBUG("WARN: no for/if out to matmul.");
     }
 
-    if (argsLimitedInMatmul == false) {
+    if (!argsLimitedInMatmul) {
         return nextValueOfC; // early return
     }
     return searchInArgsChain(nextSearchValue, argsLimitedInMatmul, mayNotExec, outerInVal);
 }
 
-bool verifyAndHandleLoopCarriedL0C(linalg::MatmulOp matmulOp, PatternRewriter &rewriter, Value bias)
+static bool verifyAndHandleLoopCarriedL0C(linalg::MatmulOp matmulOp, PatternRewriter &rewriter, Value bias)
 {
     if (matmulOp->hasAttr(CVPipeline::kLoopCarriedL0C)) {
         return false;
@@ -371,7 +372,7 @@ static void splitMatmul(linalg::MatmulOp matmulOp, PatternRewriter &rewriter)
     rewriter.replaceOp(matmulOp, addOp);
 }
 
-bool verifyMatmul(linalg::MatmulOp matmulOp)
+static bool verifyMatmul(linalg::MatmulOp matmulOp)
 {
     auto inits = matmulOp.getDpsInits();
     auto inputs = matmulOp.getDpsInputs();
