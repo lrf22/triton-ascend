@@ -25,16 +25,18 @@
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/Pass/PassManager.h"
 
-#include "ascend/include/DynamicCVPipeline/Common/Utils.h"
 #include "ascend/include/DynamicCVPipeline/AddControlFlowCondition.h"
-#include "ascend/include/DynamicCVPipeline/RemoveAttributes.h"
 #include "ascend/include/DynamicCVPipeline/AllocMultiCache.h"
+#include "ascend/include/DynamicCVPipeline/AnalyzeDataFlow.h"
+#include "ascend/include/DynamicCVPipeline/Common/Utils.h"
 #include "ascend/include/DynamicCVPipeline/Passes.h"
 #include "ascend/include/DynamicCVPipeline/PlanComputeBlock/Passes.h"
 #include "ascend/include/DynamicCVPipeline/PlanComputeBlockPass.h"
+#include "ascend/include/DynamicCVPipeline/RemoveAttributes.h"
 #include "ascend/include/DynamicCVPipeline/SeparateMemoryFromComputePass.h"
 #include "ascend/include/DynamicCVPipeline/SplitDataflowPass.h"
-#include "ascend/include/DynamicCVPipeline/AnalyzeDataFlow.h"
+
+#include "DynamicCVPipeline/StandardizeOp.h"
 
 static constexpr const char *DEBUG_TYPE = "AddDynamicCVPipeline";
 #define DBGS() (llvm::dbgs() << '[' << DEBUG_TYPE << "] ")
@@ -85,6 +87,7 @@ void AddDynamicCVPipelinePass::runOnOperation()
     ModuleOp moduleBackup(moduleOp->clone());
     PassManager pm(&getContext(), moduleOp.getOperationName());
 
+    addStandardizeOpPipeline(pm);
     pm.addPass(createPlanComputeBlockPass());
     pm.addPass(createComputeBlockOptPass());
     pm.addPass(createSplitDataflowPass());
@@ -100,7 +103,7 @@ void AddDynamicCVPipelinePass::runOnOperation()
             moduleOp->emitWarning() << "[" << DEBUG_TYPE << "] "
                 << "Pass failed; fallback to compilation without dynamic CV pipeline.";
         }
-        
+
         int errCode = errCodeAttr ? static_cast<int>(errCodeAttr.getInt()) : CVPipeline::ERRCODE_FAILED;
         restoreModuleFromBackup(moduleOp, moduleBackup);
         moduleBackup->destroy();

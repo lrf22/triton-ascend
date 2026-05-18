@@ -1,7 +1,10 @@
-file(GLOB PLAN_COMPUTE_BLOCK_PASS_SRC
+file(GLOB STANDARDIZE_OP_PASS_SRC CONFIGURE_DEPENDS
+  "StandardizeOp/*.cpp"
+)
+file(GLOB PLAN_COMPUTE_BLOCK_PASS_SRC CONFIGURE_DEPENDS
   "PlanComputeBlock/*.cpp"
 )
-file(GLOB COMMON_SRC
+file(GLOB COMMON_SRC CONFIGURE_DEPENDS
   "Common/*.cpp"
 )
 file(GLOB SPLIT_DATAFLOW_SRC_FILES CONFIGURE_DEPENDS
@@ -11,7 +14,7 @@ file(GLOB SEPARATE_MEMORY_FROM_COMPUTE_SRC_FILES CONFIGURE_DEPENDS
   "SeparateMemoryFromCompute/*.cpp"
 )
 
-file(GLOB ALLOC_MULTI_CACHE_SRCS_FILES CONFIGURE_DEPENDS 
+file(GLOB ALLOC_MULTI_CACHE_SRCS_FILES CONFIGURE_DEPENDS
   "AllocMultiCache/*.cpp"
 )
 
@@ -29,6 +32,10 @@ file(GLOB ANALYZE_DATAFLOW_SRC_FILES CONFIGURE_DEPENDS
 
 add_triton_library(DynamicCVPipeline
   AddDynamicCVPipeline.cpp
+
+  StandardizeOp.cpp
+  ${STANDARDIZE_OP_PASS_SRC}
+
   PlanComputeBlock.cpp
   ComputeBlockOptPass.cpp
   AnalyzeDataFlow.cpp

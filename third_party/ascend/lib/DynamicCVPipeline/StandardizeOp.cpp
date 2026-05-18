@@ -20,21 +20,32 @@
  * THE SOFTWARE.
  */
 
-#ifndef TRITON_ADAPTER_BLOCK_ID_OPT_PASSES_H
-#define TRITON_ADAPTER_BLOCK_ID_OPT_PASSES_H
+#include "llvm/Support/Debug.h"
 
-#include "mlir/IR/BuiltinOps.h"
-#include "mlir/Pass/Pass.h"
+#include "mlir/Pass/PassRegistry.h"
 
-namespace mlir {
-namespace triton {
+#include "ascend/include/DynamicCVPipeline/StandardizeOp.h"
 
-std::unique_ptr<OperationPass<ModuleOp>> createUBUsageOptPass();
-std::unique_ptr<OperationPass<ModuleOp>> createUnifyAllocBlockPass();
-void registerUnifyAllocBlockPass();
-std::unique_ptr<OperationPass<ModuleOp>> createFixpipeOptPass();
+#include "DynamicCVPipeline/StandardizeOp/PatternMatchRewrites.h"
 
-} // namespace triton
-} // namespace mlir
+using namespace mlir;
+using namespace triton;
+using namespace CVSplit;
 
-#endif // TRITON_ADAPTER_BLOCK_ID_OPT_PASSES_H
+static constexpr const char *DEBUG_TYPE = "StandardizeOp";
+#define LOG_DEBUG(...) LLVM_DEBUG(llvm::dbgs() << "\n[" << DEBUG_TYPE << "] " << __VA_ARGS__ << "\n")
+
+namespace mlir::triton {
+
+void addStandardizeOpPipeline(OpPassManager &pm)
+{
+    pm.addPass(createPatternMatchRewritePass());
+}
+
+void registerStandardizeOpPasses()
+{
+    PassPipelineRegistration<>(
+        "ssbuf-standardize-op", "Pipeline to standardize op for dynamic cv pipeline", addStandardizeOpPipeline);
+}
+
+} // namespace mlir::triton
