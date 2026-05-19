@@ -75,9 +75,25 @@ public:
   }
 };
 
+// Pass for analyzing reduce operations
+class AnalyzeReduceOpPass : public PassWrapper<AnalyzeReduceOpPass, OperationPass<ModuleOp>> {
+public:
+  MLIR_DEFINE_EXPLICIT_INTERNAL_INLINE_TYPE_ID(AnalyzeReduceOpPass)
+
+  AnalyzeReduceOpPass() = default;
+
+  void runOnOperation() override;
+
+  llvm::StringRef getArgument() const override { return "analyze-reduce-op"; }
+  llvm::StringRef getDescription() const override {
+    return "Analyze reduce operations for optimization opportunities";
+  }
+};
+
 std::unique_ptr<OperationPass<ModuleOp>> createAnalyzeArgsPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAnalyzeDataFlowPass();
 std::unique_ptr<OperationPass<ModuleOp>> createAnalyzeScopePass();
+std::unique_ptr<OperationPass<ModuleOp>> createAnalyzeReduceOpPass();
 
 void registerAnalyzeDataFlowPasses();
 

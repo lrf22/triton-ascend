@@ -43,6 +43,8 @@ void AnalyzeDataFlowPass::runOnOperation()
 
   pm.addPass(createAnalyzeArgsPass());
 
+  pm.addPass(createAnalyzeReduceOpPass());
+
   if (failed(runPipeline(pm, module))) {
     module->emitError() << "[" << DEBUG_TYPE << "] Pass failed!";
     signalPassFailure();
@@ -63,6 +65,7 @@ void registerAnalyzeDataFlowPasses()
 {
     registerPass(createAnalyzeArgsPass);
     registerPass(createAnalyzeScopePass);
+    registerPass(createAnalyzeReduceOpPass);
     registerPass(createAnalyzeDataFlowPass);
 }
 
