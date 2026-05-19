@@ -26,18 +26,13 @@
 #include "llvm/Support/Debug.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "bishengir/Dialect/Scope/IR/Scope.h"
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
 
 static constexpr const char *DEBUG_TYPE = "analyze-reduce-op";
-#define DBGS() (llvm::dbgs() << '[' << DEBUG_TYPE << "] ")
-#define LDBG(...) \
-LLVM_DEBUG({ \
-  DBGS(); \
-  llvm::dbgs() << __VA_ARGS__; \
-  llvm::dbgs() << "\n"; \
-})
+#define LOG_DEBUG(...) LLVM_DEBUG(llvm::dbgs() << " [" << DEBUG_TYPE << "] " << __VA_ARGS__)
 
 using namespace llvm;
 using namespace mlir;
@@ -45,25 +40,97 @@ using namespace triton;
 
 namespace {
 
+// Traverse the defining chain of a value to find if it originates from a reduce op
+static linalg::ReduceOp findReduceOpInDefiningChain(Value v,
+                                                    const llvm::DenseSet<linalg::ReduceOp *> &reduceOps)
+{
+  llvm::DenseSet<Value> visited;
+  llvm::SmallVector<Value> worklist;
+  worklist.push_back(v);
+
+  while (!worklist.empty()) {
+    Value current = worklist.pop_back_val();
+    if (visited.count(current)) {
+      continue;
+    }
+    visited.insert(current);
+
+    Operation *defOp = current.getDefiningOp();
+    if (!defOp) {
+      // Block argument, skip
+      continue;
+    }
+
+    if (auto reduceOp = dyn_cast<linalg::ReduceOp>(defOp)) {
+      if (reduceOps.count(&reduceOp)) {
+        return reduceOp;
+      }
+    }
+
+    // Add operands to worklist for further traversal
+    for (Value operand : defOp->getOperands()) {
+      if (!visited.count(operand)) {
+        worklist.push_back(operand);
+      }
+    }
+  }
+
+  return nullptr;
+}
+
+// Check scf control flow ops' operands for reduce op usage
+static void checkScfControlFlowOps(scope::ScopeOp scopeOp,
+                                   llvm::DenseSet<linalg::ReduceOp *> &reduceOps)
+{
+  auto checkScfOp = [&](Operation *scfOp) {
+    for (Value operand : scfOp->getOperands()) {
+      linalg::ReduceOp foundReduce = findReduceOpInDefiningChain(operand, reduceOps);
+      if (foundReduce) {
+        LOG_DEBUG(“remain reduceOp in cube scope for “ << scfOp->getName() << “\n”);
+        reduceOps.erase(&foundReduce);
+      }
+    }
+  };
+
+  scopeOp.walk([&](scf::IfOp ifOp) { checkScfOp(ifOp); });
+  scopeOp.walk([&](scf::ForOp forOp) { checkScfOp(forOp); });
+  scopeOp.walk([&](scf::WhileOp whileOp) { checkScfOp(whileOp); });
+}
+
+// Collect all reduce ops inside a CUBE scope
+static void collectReduceOpsInScope(scope::ScopeOp scopeOp,
+                                    llvm::DenseSet<linalg::ReduceOp *> &reduceOps)
+{
+  scopeOp.walk([&](linalg::ReduceOp reduceOp) {
+    reduceOps.insert(&reduceOp);
+  });
+}
+
 static bool checkReduceOpsInCubeScope(ModuleOp module)
 {
   bool shouldReturn = false;
 
   module.walk([&](scope::ScopeOp scopeOp) -> WalkResult {
-    auto attr = scopeOp->getAttrOfType<hivm::TCoreTypeAttr>("hivm.tcore_type");
+    auto attr = scopeOp->getAttrOfType<hivm::TCoreTypeAttr>(“hivm.tcore_type”);
     if (!attr || attr.getTcoretype() != hivm::TCoreType::CUBE) {
       return WalkResult::advance();
     }
 
-    // Walk inside CUBE scope to find reduce ops
-    scopeOp.walk([&](linalg::ReduceOp reduceOp) -> WalkResult {
-      LDBG("[ERROR]: Found reduce op inside CUBE scope!\n");
-      shouldReturn = true;
-      return WalkResult::interrupt();
-    });
+    // Collect all reduce ops in CUBE scope
+    llvm::DenseSet<linalg::ReduceOp *> reduceOps;
+    collectReduceOpsInScope(scopeOp, reduceOps);
 
-    if (shouldReturn) {
-      return WalkResult::interrupt();
+    if (reduceOps.empty()) {
+      return WalkResult::advance();
+    }
+
+    // Check scf control flow ops' operands to find reduce op usage
+    checkScfControlFlowOps(scopeOp, reduceOps);
+
+    // Report remaining reduce ops with unknown reasons
+    for (auto *reduceOp : reduceOps) {
+      LOG_DEBUG(“[ERROR]: Unknown reduce op remaining in CUBE scope: “ << *reduceOp << “\n”);
+      shouldReturn = true;
     }
 
     return WalkResult::advance();
@@ -78,14 +145,14 @@ void AnalyzeReduceOpPass::runOnOperation()
 {
   ModuleOp module = getOperation();
 
-  LDBG("Before AnalyzeReduceOp:\n" << module << "\n");
+  LOG_DEBUG("Before AnalyzeReduceOp:\n" << module << "\n");
 
   if (checkReduceOpsInCubeScope(module)) {
     signalPassFailure();
     return;
   }
 
-  LDBG("After AnalyzeReduceOp:\n" << module << "\n");
+  LOG_DEBUG("After AnalyzeReduceOp:\n" << module << "\n");
 }
 
 namespace mlir {
