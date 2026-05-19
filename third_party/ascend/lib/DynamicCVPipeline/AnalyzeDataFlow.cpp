@@ -38,6 +38,8 @@ void AnalyzeDataFlowPass::runOnOperation()
   LDBG("Enter AnalyzeDataFlow pass.");
 
   PassManager pm(&getContext(), module.getOperationName());
+  
+  pm.addPass(createAnalyzeScopePass());
 
   pm.addPass(createAnalyzeArgsPass());
 
@@ -60,6 +62,7 @@ std::unique_ptr<OperationPass<ModuleOp>> createAnalyzeDataFlowPass()
 void registerAnalyzeDataFlowPasses()
 {
     registerPass(createAnalyzeArgsPass);
+    registerPass(createAnalyzeScopePass);
     registerPass(createAnalyzeDataFlowPass);
 }
 
