@@ -21,55 +21,75 @@
  */
 
 #include "ascend/include/DynamicCVPipeline/AnalyzeDataFlow.h"
-#include "mlir/Pass/PassManager.h"
+#include "llvm/ADT/DenseMap.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/Support/Debug.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/BuiltinTypes.h"
+#include "bishengir/Dialect/HIVM/IR/HIVM.h"
 
-static constexpr const char *DEBUG_TYPE = "analyze-data-flow";
+static constexpr const char *DEBUG_TYPE = "analyze-flag";
 #define DBGS() (llvm::dbgs() << '[' << DEBUG_TYPE << "] ")
-#define LDBG(X) LLVM_DEBUG(DBGS() << (X) << "\n")
+#define LDBG(...) \
+LLVM_DEBUG({ \
+  DBGS(); \
+  llvm::dbgs() << __VA_ARGS__; \
+  llvm::dbgs() << "\n"; \
+})
 
+using namespace llvm;
 using namespace mlir;
 using namespace triton;
 
-void AnalyzeDataFlowPass::runOnOperation()
+namespace {
+
+static bool checkFlagIdValidity(ModuleOp module)
+{
+  bool shouldReturn = false;
+  int invalidFlagNum = 0;
+
+  module.walk([&](Operation *op) -> WalkResult {
+    if (!isa<hivm::SyncBlockSetOp>(op) && !isa<hivm::SyncBlockWaitOp>(op)) {
+      return WalkResult::advance();
+    }
+
+    if (auto intAttr = op->getAttrOfType<IntegerAttr>("static_flag_id")) {
+      int flag = static_cast<int>(intAttr.getInt());
+      if (flag == -1) {
+        shouldReturn = true;
+        invalidFlagNum++;
+      }
+    }
+
+    return WalkResult::advance();
+  });
+
+  LDBG("[ERROR]: flag_id is not enough for transfer, invalidFlagNum: " << invalidFlagNum << "\n");
+  return shouldReturn;
+}
+
+} // namespace
+
+void AnalyzeFlagPass::runOnOperation()
 {
   ModuleOp module = getOperation();
 
-  LDBG("Enter AnalyzeDataFlow pass.");
+  LDBG("Before AnalyzeFlag:\n" << module << "\n");
 
-  PassManager pm(&getContext(), module.getOperationName());
-  
-  pm.addPass(createAnalyzeScopePass());
-
-  pm.addPass(createAnalyzeArgsPass());
-
-  pm.addPass(createAnalyzeReduceOpPass());
-
-  pm.addPass(createAnalyzeFlagPass());
-
-  if (failed(runPipeline(pm, module))) {
-    module->emitError() << "[" << DEBUG_TYPE << "] Pass failed!";
+  if (checkFlagIdValidity(module)) {
     signalPassFailure();
+    return;
   }
 
-  LDBG("Exit AnalyzeDataFlow pass.");
+  LDBG("After AnalyzeFlag:\n");
 }
 
 namespace mlir {
 namespace triton {
 
-std::unique_ptr<OperationPass<ModuleOp>> createAnalyzeDataFlowPass()
+std::unique_ptr<OperationPass<ModuleOp>> createAnalyzeFlagPass()
 {
-  return std::make_unique<AnalyzeDataFlowPass>();
-}
-
-void registerAnalyzeDataFlowPasses()
-{
-    registerPass(createAnalyzeArgsPass);
-    registerPass(createAnalyzeScopePass);
-    registerPass(createAnalyzeReduceOpPass);
-    registerPass(createAnalyzeFlagPass);
-    registerPass(createAnalyzeDataFlowPass);
+  return std::make_unique<AnalyzeFlagPass>();
 }
 
 } // namespace triton
