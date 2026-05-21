@@ -41,9 +41,9 @@ void AnalyzeDataFlowPass::runOnOperation()
 
   pm.addPass(createAnalyzeArgsPass());
 
-  pm.addPass(createAnalyzeCubeContolFLowInputChainPass());
-
   pm.addPass(createAnalyzeFlagPass());
+
+  pm.addPass(createAnalyzeCubeContolFLowInputChainPass());
 
   if (failed(runPipeline(pm, module))) {
     module->emitError() << "[" << DEBUG_TYPE << "] Pass failed!";
