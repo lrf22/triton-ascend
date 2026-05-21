@@ -41,6 +41,8 @@ void AnalyzeDataFlowPass::runOnOperation()
 
   pm.addPass(createAnalyzeArgsPass());
 
+  pm.addPass(createAnalyzeCubeContolFLowInputChainPass());
+
   pm.addPass(createAnalyzeFlagPass());
 
   if (failed(runPipeline(pm, module))) {
@@ -63,6 +65,7 @@ void registerAnalyzeDataFlowPasses()
 {
     registerPass(createAnalyzeArgsPass);
     registerPass(createAnalyzeFlagPass);
+    registerPass(createAnalyzeCubeContolFLowInputChainPass);
     registerPass(createAnalyzeDataFlowPass);
 }
 
