@@ -65,7 +65,7 @@ static bool isControlFlowOp(Operation *op)
 // 结果为 tensor 类型的 arith.select 操作。
 // visited 用于记录已访问的 Value，避免循环引用导致无限递归。
 static bool hasDefiningChainWithReduceOrTensorSelect(Value val,
-                                                     DenseSet<Value> &visited)
+                                                     llvm::DenseSet<Value> &visited)
 {
     // 防止循环引用：若该 Value 已访问过，直接返回 false
     if (visited.contains(val)) {
@@ -110,7 +110,7 @@ static bool hasDefiningChainWithReduceOrTensorSelect(Value val,
 
 static bool checkControlFlowOpInputs(Operation *cfOp)
 {
-    DenseSet<Value> visited;
+    llvm::DenseSet<Value> visited;
 
     auto checkOperands = [&](ValueRange operands) {
         for (Value operand : operands) {
@@ -126,7 +126,7 @@ static bool checkControlFlowOpInputs(Operation *cfOp)
             return true;
         }
     } else if (auto ifOp = dyn_cast<scf::IfOp>(cfOp)) {
-        if (checkOperands(ifOp.getOperands())) {
+        if (checkOperands(ifOp->getOperands())) {
             return true;
         }
     } else if (auto whileOp = dyn_cast<scf::WhileOp>(cfOp)) {
