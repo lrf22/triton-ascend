@@ -98,6 +98,11 @@ bool DataDependencyAnalysisPass::isValidTensorForDependency(mlir::Value value)
         return false;
     }
     return true;
+    auto tensorTy = dyn_cast<TensorType>(value.getType());
+    static constexpr int NdShapeLength = 2;
+    if (tensorTy && tensorTy.getRank() == NdShapeLength) {
+        return false;
+    }
 }
 
 // Helper: Check if value is a arg
