@@ -22,7 +22,14 @@
 
 #include "ascend/include/DynamicCVPipeline/AnalyzeDataFlow.h"
 #include "ascend/include/DynamicCVPipeline/Common/Utils.h"
+#include "llvm/ADT/DenseSet.h"
 #include "llvm/Support/Debug.h"
+#include "bishengir/Dialect/HIVM/IR/HIVM.h"
+#include "bishengir/Dialect/Scope/IR/Scope.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
+#include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
+#include "mlir/IR/BuiltinTypes.h"
 
 static constexpr const char *DEBUG_TYPE = "analyze-cube-control-flow-input-chain";
 #define DBGS() (llvm::dbgs() << '[' << DEBUG_TYPE << "] ")
@@ -39,13 +46,135 @@ using namespace triton;
 using namespace CVPipeline;
 
 namespace {
-bool checkCubeControlFlowInputChain(ModuleOp module) {
-    //遍历标签为auto cubeAttr = hivm::TCoreTypeAttr::get(builder.getContext(), hivm::TCoreType::CUBE);的scope.scope op的内部
-    //对于scf.if scf.for scf.while op
-    //遍历入参
-    //找到入参的definingop并一直向上找defining链，如果存在linalg.reduce op或者入参为tensor的arith.select op则返回true
+
+static bool isCubeScope(scope::ScopeOp scopeOp)
+{
+    auto coreTypeAttr = scopeOp->getAttrOfType<hivm::TCoreTypeAttr>(hivm::TCoreTypeAttr::name);
+    if (!coreTypeAttr) {
+        return false;
+    }
+    return coreTypeAttr.getTcoretype() == hivm::TCoreType::CUBE;
 }
+
+static bool isControlFlowOp(Operation *op)
+{
+    return isa<scf::IfOp>(op) || isa<scf::ForOp>(op) || isa<scf::WhileOp>(op);
 }
+
+// 沿着 Value 的 definingOp 链向上递归搜索，检测是否存在 linalg.reduce 或
+// 结果为 tensor 类型的 arith.select 操作。
+// visited 用于记录已访问的 Value，避免循环引用导致无限递归。
+static bool hasDefiningChainWithReduceOrTensorSelect(Value val,
+                                                     DenseSet<Value> &visited)
+{
+    // 防止循环引用：若该 Value 已访问过，直接返回 false
+    if (visited.contains(val)) {
+        return false;
+    }
+    visited.insert(val);
+
+    // 获取当前 Value 的定义操作，若为 BlockArgument 则 defOp 为 nullptr
+    Operation *defOp = val.getDefiningOp();
+    while (defOp) {
+        // 检查是否为 linalg.reduce 操作
+        if (isa<linalg::ReduceOp>(defOp)) {
+            LDBG("Found linalg.reduce in defining chain");
+            return true;
+        }
+
+        // 检查是否为 arith.select 且结果为 tensor 类型
+        if (auto selectOp = dyn_cast<arith::SelectOp>(defOp)) {
+            if (isa<RankedTensorType>(selectOp.getType())) {
+                LDBG("Found arith.select with tensor result in defining chain");
+                return true;
+            }
+        }
+
+        // 若当前操作无操作数，defining 链无法继续向上追溯，终止搜索
+        if (defOp->getNumOperands() == 0) {
+            break;
+        }
+
+        // 对当前操作的所有操作数递归搜索其 defining 链
+        for (Value operand : defOp->getOperands()) {
+            if (hasDefiningChainWithReduceOrTensorSelect(operand, visited)) {
+                return true;
+            }
+        }
+        // 当前 defOp 的操作数已全部递归检查完毕，无需继续 while 循环
+        break;
+    }
+
+    return false;
+}
+
+static bool checkControlFlowOpInputs(Operation *cfOp)
+{
+    DenseSet<Value> visited;
+
+    auto checkOperands = [&](ValueRange operands) {
+        for (Value operand : operands) {
+            if (hasDefiningChainWithReduceOrTensorSelect(operand, visited)) {
+                return true;
+            }
+        }
+        return false;
+    };
+
+    if (auto forOp = dyn_cast<scf::ForOp>(cfOp)) {
+        if (checkOperands(forOp.getInitArgs())) {
+            return true;
+        }
+    } else if (auto ifOp = dyn_cast<scf::IfOp>(cfOp)) {
+        if (checkOperands(ifOp.getOperands())) {
+            return true;
+        }
+    } else if (auto whileOp = dyn_cast<scf::WhileOp>(cfOp)) {
+        if (checkOperands(whileOp.getOperands())) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+bool checkCubeControlFlowInputChain(ModuleOp module)
+{
+    bool shouldReturn = false;
+
+    module.walk([&](scope::ScopeOp scopeOp) -> WalkResult {
+        if (!isCubeScope(scopeOp)) {
+            return WalkResult::advance();
+        }
+
+        LDBG("Found CUBE scope");
+
+        scopeOp.walk([&](Operation *op) -> WalkResult {
+            if (!isControlFlowOp(op)) {
+                return WalkResult::advance();
+            }
+
+            LDBG("Found control flow op in CUBE scope");
+
+            if (checkControlFlowOpInputs(op)) {
+                shouldReturn = true;
+                return WalkResult::interrupt();
+            }
+
+            return WalkResult::advance();
+        });
+
+        if (shouldReturn) {
+            return WalkResult::interrupt();
+        }
+
+        return WalkResult::advance();
+    });
+
+    return shouldReturn;
+}
+
+} // namespace
 
 void AnalyzeCubeControlFlowInputChainPass::runOnOperation()
 {
