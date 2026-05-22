@@ -63,6 +63,11 @@ static bool checkVecScopeMainLoop(ModuleOp module) {
       return WalkResult::advance();
     }
 
+    scopeOp.walk([&](hivm::CopyOp copyOp) -> WalkResult {
+      isMainLoop = true;
+      return WalkResult::interrupt();
+    });
+
     scopeOp.walk([&](scf::ForOp forOp) -> WalkResult {
       if (!forOp->hasAttr("ssbuffer.main_loop")) {
         return WalkResult::advance();
