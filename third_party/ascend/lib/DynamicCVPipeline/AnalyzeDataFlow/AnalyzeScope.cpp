@@ -29,6 +29,7 @@
 #include "mlir/IR/BuiltinTypes.h"
 #include "bishengir/Dialect/Scope/IR/Scope.h"
 #include "bishengir/Dialect/HIVM/IR/HIVM.h"
+#include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 
 static constexpr const char *DEBUG_TYPE = "analyze-scope";
 #define DBGS() (llvm::dbgs() << '[' << DEBUG_TYPE << "] ")
@@ -42,8 +43,57 @@ LLVM_DEBUG({ \
 using namespace llvm;
 using namespace mlir;
 using namespace triton;
+using namespace CVPipeline;
 
 namespace {
+static bool isVectorScope(scope::ScopeOp scopeOp)
+{
+    auto coreTypeAttr = scopeOp->getAttrOfType<hivm::TCoreTypeAttr>(hivm::TCoreTypeAttr::name);
+    if (!coreTypeAttr) {
+        return false;
+    }
+    return coreTypeAttr.getTcoretype() == hivm::TCoreType::VECTOR;
+}
+
+static bool checkVecScopeMainLoop(ModuleOp module) {
+  bool isMainLoop = false;
+
+  module.walk([&](scope::ScopeOp scopeOp) {
+    if (!isVectorScope(scopeOp)) {
+      return WalkResult::advance();
+    }
+
+    scopeOp.walk([&](scf::ForOp forOp) -> WalkResult {
+      if (!forOp->hasAttr("ssbuffer.main_loop")) {
+        return WalkResult::advance();
+      }
+
+      forOp.walk([&](bufferization::ToTensorOp toTensorOp) -> WalkResult {
+        if (!toTensorOp->hasAttr("ssbuffer.transfer_id")) {
+          return WalkResult::advance();
+        }
+
+        for (Operation *user : toTensorOp->getUsers()) {
+          if (!user->hasAttr("ssbuffer.add_from_matmul")) {
+            isMainLoop = true;
+            break;
+          }
+          for (Operation *userUser : user->getUsers()) {
+            if (!isa<scf::YieldOp>(userUser)) {
+              isMainLoop = true;
+              break;
+            }
+          }
+        }
+        return isMainLoop ? WalkResult::interrupt() : WalkResult::advance();
+      });
+      return isMainLoop ? WalkResult::interrupt() : WalkResult::advance();
+    });
+    return isMainLoop ? WalkResult::interrupt() : WalkResult::advance();
+  });
+
+  return isMainLoop;
+}
 
 static LogicalResult verifyMainLoop(ModuleOp module)
 {
@@ -60,6 +110,12 @@ static LogicalResult verifyMainLoop(ModuleOp module)
     CVPipeline::setFallbackAttr(module);
     return failure();
   }
+
+  if (!checkVecScopeMainLoop(module)) {
+    LDBG("[INFO]: No op beside matmul add in vector main loop.");
+    CVPipeline::setFallbackAttr(module);
+    return failure();
+  };
 
   return success();
 }
