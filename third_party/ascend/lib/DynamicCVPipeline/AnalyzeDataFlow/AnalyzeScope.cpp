@@ -56,7 +56,8 @@ static bool isVectorScope(scope::ScopeOp scopeOp)
 }
 
 static bool checkVecScopeMainLoop(ModuleOp module) {
-  bool isMainLoop = false;
+  bool hasMainLoopFor = false;
+  bool allSatisfy = true;
 
   module.walk([&](scope::ScopeOp scopeOp) -> WalkResult {
     if (!isVectorScope(scopeOp)) {
@@ -67,6 +68,10 @@ static bool checkVecScopeMainLoop(ModuleOp module) {
       if (!forOp->hasAttr("ssbuffer.main_loop")) {
         return WalkResult::advance();
       }
+
+      hasMainLoopFor = true;
+      bool forSatisfies = false;
+
       forOp.walk([&](mlir::Operation *op) -> WalkResult {
         if (op == forOp) {
           return WalkResult::advance();
@@ -79,19 +84,28 @@ static bool checkVecScopeMainLoop(ModuleOp module) {
           }
         }
         if (hasTensorResult && !op->hasAttr("ssbuffer.add_from_matmul") && !op->hasAttr("ssbuffer.transfer_id")) {
-          isMainLoop = true;
+          forSatisfies = true;
           return WalkResult::interrupt();
         }
-        return isMainLoop ? WalkResult::interrupt() : WalkResult::advance();
+        return WalkResult::advance();
       });
 
-      return isMainLoop ? WalkResult::interrupt() : WalkResult::advance();
+      if (!forSatisfies) {
+        allSatisfy = false;
+        return WalkResult::interrupt();
+      }
+
+      return WalkResult::advance();
     });
 
-    return isMainLoop ? WalkResult::interrupt() : WalkResult::advance();
+    if (!allSatisfy) {
+      return WalkResult::interrupt();
+    }
+
+    return WalkResult::advance();
   });
 
-  return isMainLoop;
+  return hasMainLoopFor && allSatisfy;
 }
 
 static LogicalResult verifyMainLoop(ModuleOp module)
