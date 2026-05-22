@@ -58,42 +58,36 @@ static bool isVectorScope(scope::ScopeOp scopeOp)
 static bool checkVecScopeMainLoop(ModuleOp module) {
   bool isMainLoop = false;
 
-  module.walk([&](scope::ScopeOp scopeOp) {
+  module.walk([&](scope::ScopeOp scopeOp) -> WalkResult {
     if (!isVectorScope(scopeOp)) {
       return WalkResult::advance();
     }
-
-    scopeOp.walk([&](hivm::CopyOp copyOp) -> WalkResult {
-      isMainLoop = true;
-      return WalkResult::interrupt();
-    });
 
     scopeOp.walk([&](scf::ForOp forOp) -> WalkResult {
       if (!forOp->hasAttr("ssbuffer.main_loop")) {
         return WalkResult::advance();
       }
-
-      forOp.walk([&](bufferization::ToTensorOp toTensorOp) -> WalkResult {
-        if (!toTensorOp->hasAttr("ssbuffer.transfer_id")) {
+      forOp.walk([&](mlir::Operation *op) -> WalkResult {
+        if (op == forOp) {
           return WalkResult::advance();
         }
-
-        for (Operation *user : toTensorOp->getUsers()) {
-          if (!user->hasAttr("ssbuffer.add_from_matmul")) {
-            isMainLoop = true;
+        bool hasTensorResult = false;
+        for (Value result : op->getResults()) {
+          if (isa<RankedTensorType>(result.getType())) {
+            hasTensorResult = true;
             break;
           }
-          for (Operation *userUser : user->getUsers()) {
-            if (!isa<scf::YieldOp>(userUser)) {
-              isMainLoop = true;
-              break;
-            }
-          }
+        }
+        if (hasTensorResult && !op->hasAttr("ssbuffer.add_from_matmul") && !op->hasAttr("ssbuffer.transfer_id")) {
+          isMainLoop = true;
+          return WalkResult::interrupt();
         }
         return isMainLoop ? WalkResult::interrupt() : WalkResult::advance();
       });
+
       return isMainLoop ? WalkResult::interrupt() : WalkResult::advance();
     });
+
     return isMainLoop ? WalkResult::interrupt() : WalkResult::advance();
   });
 
