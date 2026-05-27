@@ -722,8 +722,8 @@ void InterCoreTransferAndSyncPass::insertMemDepSync(OpBuilder &builder, Operatio
         attachCommonTags(waitOp, static_cast<int>(*consBlockIdOpt), consCoreType);
     }
 
-    LOG_DEBUG("[PIPE_S setOp]: " << *setOp << "\n");
-    LOG_DEBUG("[PIPE_S waitOp]: " << *waitOp << "\n");
+    LOG_DEBUG("[PIPE_MTE2 setOp]: " << *setOp << "\n");
+    LOG_DEBUG("[PIPE_MTE2 waitOp]: " << *waitOp << "\n");
 }
 
 // V->C Transfer Logic
@@ -788,11 +788,11 @@ LogicalResult InterCoreTransferAndSyncPass::handleCubeToVector(OpBuilder &builde
     return success();
 }
 
-// PIPE_S Memory Dependency
+// Memory Dependency
 LogicalResult InterCoreTransferAndSyncPass::handleMemoryDependency(OpBuilder &builder, DependencyInfo &dep,
     size_t depIndex, llvm::SmallVector<DependencyInfo> memDependencies, FlagIdManager &flagManager)
 {
-    LOG_DEBUG("Handling PIPE_S memory dependency...\n");
+    LOG_DEBUG("Handling memory dependency...\n");
 
     // Get producer and consumer block start/end operations
     auto [prodStart, prodEnd] = getBlockStartEnd(dep.producerBlockId, module);
@@ -804,7 +804,7 @@ LogicalResult InterCoreTransferAndSyncPass::handleMemoryDependency(OpBuilder &bu
     }
 
     if (isOuterLayerDependency(depIndex, prodEnd, consStart, memDependencies)) {
-        LOG_DEBUG("[PIPE_S] Skipping outer layer dependency: block " << dep.producerBlockId << " -> block " <<
+        LOG_DEBUG("[MEMDEP] Skipping outer layer dependency: block " << dep.producerBlockId << " -> block " <<
             dep.consumerBlockId << "\n");
         return success();
     }
@@ -823,7 +823,7 @@ LogicalResult InterCoreTransferAndSyncPass::handleMemoryDependency(OpBuilder &bu
 
     transferIndex++;
 
-    LOG_DEBUG("Inserted PIPE_S sync: block " << dep.producerBlockId << " -> block " << dep.consumerBlockId <<
+    LOG_DEBUG("Inserted PIPE_MTE2 sync: block " << dep.producerBlockId << " -> block " << dep.consumerBlockId <<
         ", flagId = " << flagId << "\n");
 
     return success();
@@ -886,7 +886,7 @@ LogicalResult InterCoreTransferAndSyncPass::processDependencies(FlagIdManager &f
 
     for (size_t i = 0; i < memDependencies.size(); ++i) {
         auto& dep = memDependencies[i];
-        LOG_DEBUG("[PIPE_S] value = " << dep.value
+        LOG_DEBUG("[MEMDEP] value = " << dep.value
                     << " producerBlockId = " << dep.producerBlockId
                     << ", consumerBlockId = " << dep.consumerBlockId << "\n");
         if (failed(handleMemoryDependency(builder, dep, i, memDependencies, flagManager))) {
