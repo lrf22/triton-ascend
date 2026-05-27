@@ -35,6 +35,9 @@ constexpr int INIT_SIZE = 4;
 class MemoryDependenceGraph {
 public:
     MemoryDependenceGraph(Operation *root, AliasAnalysis &aa);
+    virtual ~MemoryDependenceGraph() = default;
+
+    void init();
 
     ArrayRef<Operation *> getMemDefs(Operation *op) const;
     ArrayRef<Operation *> getMemUsers(Operation *op) const;
@@ -43,6 +46,12 @@ public:
     ArrayRef<Operation *> getExecAfter(Operation *op) const;
 
 private:
+    void analyzeOp(Operation *op);
+    void analyzeRegionsOf(Operation *op);
+
+    SmallVector<MemoryEffects::EffectInstance> collectOuterEffects(Operation *op, bool &unknown);
+
+protected:
     struct MemSlot {
         Value memref;
         Operation *lastWriter = nullptr;
@@ -55,11 +64,6 @@ private:
         SmallVector<MemSlot> states;
     };
 
-    void analyzeOp(Operation *op);
-    void analyzeRegionsOf(Operation *op);
-
-    SmallVector<MemoryEffects::EffectInstance> collectOuterEffects(Operation *op, bool &unknown);
-
     SmallVector<MemSlot *> findAliasSlots(Value v);
     ArrayRef<MemSlot *> resolveAliasSlots(Value v,
                                           DenseMap<Value, SmallVector<MemSlot *>> &cache);
@@ -69,8 +73,12 @@ private:
                       SmallVectorImpl<Operation *> &defsOut,
                       SmallVectorImpl<Operation *> &predsOut);
 
-    void applyEffects(Operation *op, ArrayRef<MemoryEffects::EffectInstance> effects, bool unknown);
+    SmallVector<std::unique_ptr<MemSlot>> slots;
+    DenseMap<Value, MemSlot *> valueToSlot;
 
+    virtual void applyEffects(Operation *op, ArrayRef<MemoryEffects::EffectInstance> effects, bool unknown);
+
+private:
     Snapshot takeSnapshot() const;
     void restoreSnapshot(Snapshot &&snap);
 
@@ -87,9 +95,6 @@ private:
     // Execute order
     DenseMap<Operation *, SmallVector<Operation *>> execBefore;
     DenseMap<Operation *, SmallVector<Operation *>> execAfter;
-
-    SmallVector<std::unique_ptr<MemSlot>> slots;
-    DenseMap<Value, MemSlot *> valueToSlot;
 };
 
 } // namespace CVPipeline

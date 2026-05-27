@@ -688,6 +688,7 @@ void mlir::triton::UBUsageOptPass::runOnOperation()
     ModuleOp module = getOperation();
     auto &aliasAnalysis = getAnalysis<AliasAnalysis>();
     CVPipeline::MemoryDependenceGraph memDepGraph(module, aliasAnalysis);
+    memDepGraph.init();
     auto bm = CVPipeline::ComputeBlockIdManager(module);
 
     llvm::SmallVector<Block *> blocks;

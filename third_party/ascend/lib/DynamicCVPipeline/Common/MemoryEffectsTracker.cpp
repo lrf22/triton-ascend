@@ -103,6 +103,10 @@ bool isKnownNoMemoryEffectCall(Operation *op)
 
 MemoryDependenceGraph::MemoryDependenceGraph(Operation *root, AliasAnalysis &aa) : root(root), aa(aa)
 {
+}
+
+void MemoryDependenceGraph::init()
+{
     if (!root) {
         return;
     }

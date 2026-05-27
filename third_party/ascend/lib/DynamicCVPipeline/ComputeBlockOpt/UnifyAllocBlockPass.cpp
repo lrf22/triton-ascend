@@ -566,6 +566,7 @@ public:
     LOG_DEBUG("Before: " << *module << "\n");
     auto &aa = getAnalysis<AliasAnalysis>();
     CVPipeline::MemoryDependenceGraph memGraph(module, aa);
+    memGraph.init();
     auto bm = CVPipeline::ComputeBlockIdManager(module);
 
     module.walk([&](memref::AllocOp allocOp) {

@@ -23,6 +23,7 @@
 #include "ascend/include/DynamicCVPipeline/SplitDataflow/DataDependencyAnalysis.h"
 #include "ascend/include/DynamicCVPipeline/Common/Utils.h"
 #include "ascend/include/DynamicCVPipeline/Common/MemoryEffectsTracker.h"
+#include "ascend/include/DynamicCVPipeline/SplitDataflow/SplitDataflowMemoryEffectsTracker.h"
 
 #include "mlir/Analysis/AliasAnalysis.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
@@ -469,7 +470,8 @@ void DataDependencyAnalysisPass::analyzeMemoryEffect(DataDependencyInfo &info)
     LOG_DEBUG("\n=== start mem dep analysis ===\n");
 
     auto &aliasAnalysis = getAnalysis<mlir::AliasAnalysis>();
-    MemoryDependenceGraph memDepGraph(module, aliasAnalysis);
+    SplitDataflowMemoryDependenceGraph memDepGraph(module, aliasAnalysis);
+    memDepGraph.init();
 
     module.walk([&](mlir::Operation *op) {
         auto currBlockIdOpt = CVPipeline::getOpBlockId(op);
@@ -508,7 +510,10 @@ void DataDependencyAnalysisPass::analyzeMemoryEffect(DataDependencyInfo &info)
 
             memoryDependencies.push_back(depInfo);
             LOG_DEBUG("=mem dep analysis= "
-                << "producer Block: " << predBlockId << "consumer Block: " << currBlockId << "\n");
+                << "\nproducer Block: " << predBlockId
+                << "\nproducer Op: " << *predOp
+                << "\nconsumer Block: " << currBlockId
+                << "\nconsumer Op: " << *op << "\n");
         }
     });
     LOG_DEBUG("=== mem dep analysis complete ===\n");
