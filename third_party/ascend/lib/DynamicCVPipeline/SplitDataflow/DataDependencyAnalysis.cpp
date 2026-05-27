@@ -481,6 +481,9 @@ void DataDependencyAnalysisPass::analyzeMemoryEffect(DataDependencyInfo &info)
     MemoryDependenceGraph memDepGraph(module, aliasAnalysis);
 
     module.walk([&](mlir::Operation *op) {
+        if (op.getNumRegions() > 0) {
+            return;
+        }
         auto currBlockIdOpt = CVPipeline::getOpBlockId(op);
         llvm::StringRef currCoreType = getSsbufferCoreType(op);
         if (!currBlockIdOpt || currCoreType.empty()) {
@@ -489,6 +492,7 @@ void DataDependencyAnalysisPass::analyzeMemoryEffect(DataDependencyInfo &info)
         int currBlockId = static_cast<int>(*currBlockIdOpt);
 
         for (mlir::Operation *predOp : memDepGraph.getExecBefore(op)) {
+            //调新接口判断原始op
             auto predBlockIdOpt = CVPipeline::getOpBlockId(predOp);
             llvm::StringRef predCoreType = getSsbufferCoreType(predOp);
             if (!predBlockIdOpt || predCoreType == currCoreType || predCoreType.empty()) {
@@ -519,7 +523,10 @@ void DataDependencyAnalysisPass::analyzeMemoryEffect(DataDependencyInfo &info)
 
             memoryDependencies.push_back(depInfo);
             LOG_DEBUG("=mem dep analysis= "
-                << "producer Block: " << predBlockId << "consumer Block: " << currBlockId << "\n");
+                << "\nproducer Block: " << predBlockId
+                << "\nproducer Op: " << *predOp
+                << "\nconsumer Block: " << currBlockId
+                << "\nconsumer Op: " << *op << "\n");
         }
     });
     LOG_DEBUG("=== mem dep analysis complete ===\n");
