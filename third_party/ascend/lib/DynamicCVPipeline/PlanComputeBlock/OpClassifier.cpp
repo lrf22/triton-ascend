@@ -334,7 +334,7 @@ void OpClassifierPass::matchExtractSlicePattern(Operation *user)
     cubeSeeds.push_back(extractSliceOp);
     // Also mark downstream hivm.hir.store as CUBE
     for (Operation *sliceUser : extractSliceOp->getUsers()) {
-        if (isa<hivm::StoreOp>(sliceUser)) {
+        if (isa<hivm::StoreOp>(sliceUser) || isa<bufferization::MaterializeInDestinationOp>(sliceUser)) {
             markCube(sliceUser);
             cubeSeeds.push_back(sliceUser);
         }
