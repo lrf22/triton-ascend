@@ -59,11 +59,6 @@ static constexpr const char *DEBUG_TYPE = "inter-core-transfer-and-sync";
 using namespace mlir::triton;
 using namespace hivm;
 
-// Attribute name constants
-static constexpr const char *kBlockIdAttr = "ssbuffer.block_id";
-static constexpr const char *kCoreTypeAttr = "ssbuffer.core_type";
-static constexpr const char *kTransferIdAttr = "ssbuffer.transfer_id";
-
 static constexpr int kIntegerBitWidth = 32;
 static constexpr int NzDimWidth = 16;
 
@@ -104,16 +99,16 @@ static uint64_t getBlockElemsFor32BAlign(Type elemType)
 static void attachCommonTags(Operation *op, int blockId, StringRef coreType)
 {
     MLIRContext *ctx = op->getContext();
-    op->setAttr(kBlockIdAttr, IntegerAttr::get(IntegerType::get(ctx, kIntegerBitWidth), blockId));
-    op->setAttr(kCoreTypeAttr, StringAttr::get(ctx, coreType));
+    op->setAttr(CVPipeline::kBlockId, IntegerAttr::get(IntegerType::get(ctx, kIntegerBitWidth), blockId));
+    op->setAttr(CVPipeline::kCoreType, StringAttr::get(ctx, coreType));
 }
 
 static void attachTransferTags(Operation *op, int blockId, StringRef coreType, int transferId)
 {
     MLIRContext *ctx = op->getContext();
-    op->setAttr(kBlockIdAttr, IntegerAttr::get(IntegerType::get(ctx, kIntegerBitWidth), blockId));
-    op->setAttr(kCoreTypeAttr, StringAttr::get(ctx, coreType));
-    op->setAttr(kTransferIdAttr, IntegerAttr::get(IntegerType::get(ctx, kIntegerBitWidth), transferId));
+    op->setAttr(CVPipeline::kBlockId, IntegerAttr::get(IntegerType::get(ctx, kIntegerBitWidth), blockId));
+    op->setAttr(CVPipeline::kCoreType, StringAttr::get(ctx, coreType));
+    op->setAttr(CVPipeline::kTransferId, IntegerAttr::get(IntegerType::get(ctx, kIntegerBitWidth), transferId));
 }
 
 static void attachAnalyzeFlagIdTag(Operation *op)
@@ -659,7 +654,7 @@ mlir::Operation *InterCoreTransferAndSyncPass::getConsumerWaitPoint(int transfer
         if (!isa<hivm::ConvertLayoutOp>(op) && !isa<memref::MemorySpaceCastOp>(op)) {
             return;
         }
-        auto transferIdAttr = op->getAttrOfType<IntegerAttr>(kTransferIdAttr);
+        auto transferIdAttr = op->getAttrOfType<IntegerAttr>(CVPipeline::kTransferId);
         if (transferIdAttr && transferIdAttr.getInt() == transferIndex) {
             consumerWaitPoint = op;
         }
@@ -950,7 +945,7 @@ static std::optional<hivm::TCoreType> getAnalyzeCoreType(Operation *op)
         }
     }
 
-    auto coreStringAttr = op->getAttrOfType<StringAttr>(kCoreTypeAttr);
+    auto coreStringAttr = op->getAttrOfType<StringAttr>(CVPipeline::kCoreType);
     if (!coreStringAttr) {
         return std::nullopt;
     }

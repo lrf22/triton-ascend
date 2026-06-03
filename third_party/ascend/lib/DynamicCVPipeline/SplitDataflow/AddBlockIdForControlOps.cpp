@@ -46,14 +46,14 @@ void AddBlockIdForControlOpsPass::runOnOperation()
   // Step 2: add block_id for control flow ops
   module.walk([&](Operation *op) {
     // skip op with block_id
-    if (op->getAttrOfType<IntegerAttr>("ssbuffer.block_id")) {
+    if (op->getAttrOfType<IntegerAttr>(CVPipeline::kBlockId)) {
       return;
     }
 
     if (isa<scf::ForOp, scf::IfOp, scf::WhileOp>(op)) {
       maxBlockId++;
       static constexpr int kIntegerBitWidth = 32;
-      op->setAttr("ssbuffer.block_id",
+      op->setAttr(CVPipeline::kBlockId,
                   IntegerAttr::get(IntegerType::get(module.getContext(), kIntegerBitWidth), maxBlockId));
       LOG_DEBUG("Added block_id " << maxBlockId << " to " << *op << "\n");
     }
