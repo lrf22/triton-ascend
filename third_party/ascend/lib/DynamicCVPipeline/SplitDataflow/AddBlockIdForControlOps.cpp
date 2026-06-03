@@ -22,6 +22,7 @@
  */
 
 #include "ascend/include/DynamicCVPipeline/SplitDataflow/AddBlockIdForControlOps.h"
+#include "ascend/include/DynamicCVPipeline/SplitDataflow/Utils.h"
 #include "ascend/include/DynamicCVPipeline/Common/Utils.h"
 #include "llvm/Support/Debug.h"
 
@@ -35,7 +36,6 @@ using namespace mlir::triton;
 // Pass Entry Point
 void AddBlockIdForControlOpsPass::runOnOperation()
 {
-  static constexpr int kIntegerBitWidth = 32;
   LOG_DEBUG("\n--- enter AddBlockIdForControlOpsPass --->\n");
   ModuleOp module = getOperation();
 
@@ -46,17 +46,14 @@ void AddBlockIdForControlOpsPass::runOnOperation()
 
   // Step 2: add block_id for control flow ops
   module.walk([&](Operation *op) {
-    
     // skip op with block_id
-    if (op->getAttrOfType<IntegerAttr>("ssbuffer.block_id")) {
+    if (op->getAttrOfType<IntegerAttr>(CVPipeline::kBlockId)) {
       return;
     }
 
-    if (isa<scf::ForOp, scf::IfOp, scf::WhileOp>(op)) {
-      
+    if (isa<scf::ForOp, scf::IfOp>(op)) {
       maxBlockId++;
-      op->setAttr("ssbuffer.block_id",
-                  IntegerAttr::get(IntegerType::get(module.getContext(), kIntegerBitWidth), maxBlockId));
+      setOpBlockId(op, maxBlockId);
       LOG_DEBUG("Added block_id " << maxBlockId << " to " << *op << "\n");
     }
 
@@ -67,13 +64,12 @@ void AddBlockIdForControlOpsPass::runOnOperation()
 
       int yieldBlockId;
       if (ifBlockIdOpt) {
-        yieldBlockId = static_cast<int>(*ifBlockIdOpt);
+        yieldBlockId = *ifBlockIdOpt;
       } else {
         maxBlockId++;
         yieldBlockId = maxBlockId;
       }
-      op->setAttr("ssbuffer.block_id",
-                  IntegerAttr::get(IntegerType::get(module.getContext(), kIntegerBitWidth), yieldBlockId));
+      setOpBlockId(op, yieldBlockId);
       LOG_DEBUG("Added block_id " << yieldBlockId << " to " << *op << "\n");
     }
   });
