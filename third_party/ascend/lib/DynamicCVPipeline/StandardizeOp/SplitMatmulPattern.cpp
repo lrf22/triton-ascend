@@ -22,11 +22,9 @@
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
-#include "llvm/ADT/TypeSwitch.h"
 #include "llvm/IR/Verifier.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Debug.h"
-#include "llvm/Support/Error.h"
 #include "llvm/Support/LogicalResult.h"
 
 #include "DynamicCVPipeline/PlanComputeBlock/Common.h"
@@ -34,7 +32,6 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
-#include "mlir/IR/BuiltinAttributeInterfaces.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Dominance.h"
@@ -43,8 +40,8 @@
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/Support/LLVM.h"
 
-#include "ascend/include/DynamicCVPipeline/StandardizeOp/PatternMatchRewrites.h"
 #include "ascend/include/DynamicCVPipeline/Common/Utils.h"
+#include "ascend/include/DynamicCVPipeline/StandardizeOp/PatternMatchRewrites.h"
 
 using namespace llvm;
 using namespace mlir;
@@ -62,18 +59,14 @@ struct MatmulInputs {
     Value bias;
 };
 
-}
+} // namespace
 
 static inline MatmulInputs parseMatmulInputs(linalg::MatmulOp matmulOp)
 {
     auto inits = matmulOp.getDpsInits();
     auto inputs = matmulOp.getDpsInputs();
 
-    return {
-      inputs[0],
-      inputs[1],
-      inits[0]
-    };
+    return {inputs[0], inputs[1], inits[0]};
 }
 
 // the user is responsible for checking biasDefOp is not null
@@ -95,7 +88,8 @@ static Value getConditionForOuterDefOp(OpBuilder &builder, Operation *outerDefOp
     if (auto forOp = dyn_cast<scf::ForOp>(outerDefOp)) {
         auto loc = forOp.getLoc();
         auto diff = builder.create<arith::SubIOp>(loc, forOp.getUpperBound(), forOp.getLowerBound());
-        return builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, diff, builder.create<arith::ConstantIntOp>(loc, 0, diff.getType()));
+        return builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, diff,
+                                             builder.create<arith::ConstantIntOp>(loc, 0, diff.getType()));
     }
     LOG_DEBUG("WARN: Create one always true if");
     return builder.create<arith::ConstantIntOp>(outerDefOp->getLoc(), 1, 1);
@@ -108,14 +102,13 @@ static bool isFloatOrInt(RankedTensorType tensorType)
     return isa<FloatType, IntegerType>(elmType);
 }
 
-// 沿着args向外侧找，需要获得三个信息：
-// 1. args仅由matmul使用并更新 bool argsLimitedInMatmul
-// 2. matmul是否是一定执行的 bool mayNotExec
-// 3. 最外层的初始化值 Value outerInVal
-// 4. 最外层的for或者if, 也就是需要插入if/else的地方.
+// Search outward from args to obtain the following information:
+// 1. Whether args is only used and updated by matmul: bool argsLimitedInMatmul
+// 2. Whether matmul is guaranteed to execute: bool mayNotExec
+// 3. Outermost initial value: Value outerInVal
+// 4. Outermost for or if, i.e., where to insert if/else.
 Value searchInArgsChain(Value nextValueOfC, bool &argsLimitedInMatmul, bool &mayNotExec, Value &outerInVal)
 {
-    // llvm::errs() << "Search in args chain, current value: " << nextValueOfC << "\n";
     if (outerInVal.getDefiningOp()) {
         return nextValueOfC;
     }
@@ -123,15 +116,15 @@ Value searchInArgsChain(Value nextValueOfC, bool &argsLimitedInMatmul, bool &may
     auto parentOp = op->getParentOp();
     Value nextSearchValue = nextValueOfC;
 
-
     // update mayNotExec
     if (auto forOp = dyn_cast<scf::ForOp>(parentOp)) {
         IntegerAttr ubAttr, lbAttr;
         if (matchPattern(forOp.getUpperBound(), m_Constant(&ubAttr)) &&
-            matchPattern(forOp.getLowerBound(), m_Constant(&lbAttr))) {
-        if (ubAttr.getValue().sle(lbAttr.getValue())) {
-            mayNotExec = true;
-        }
+            matchPattern(forOp.getLowerBound(), m_Constant(&lbAttr)))
+        {
+            if (ubAttr.getValue().sle(lbAttr.getValue())) {
+                mayNotExec = true;
+            }
         } else {
             mayNotExec = true;
         }
@@ -153,10 +146,9 @@ Value searchInArgsChain(Value nextValueOfC, bool &argsLimitedInMatmul, bool &may
             auto user = use.getOwner();
             // Allowed: the op itself (mmad or inner for/if that chains to mmad).
             auto userInBlock = CVPipeline::getAncestorInBlock(user, op->getBlock());
-            if (userInBlock == op){
+            if (userInBlock == op) {
                 continue;
-            }
-            else if (auto yieldOp = dyn_cast<scf::YieldOp>(userInBlock)) {
+            } else if (auto yieldOp = dyn_cast<scf::YieldOp>(userInBlock)) {
                 argsLimitedInMatmul = (use.getOperandNumber() == argIdx);
             } else {
                 argsLimitedInMatmul = false;
@@ -168,8 +160,10 @@ Value searchInArgsChain(Value nextValueOfC, bool &argsLimitedInMatmul, bool &may
         if (!ifOp.elseBlock()) {
             argsLimitedInMatmul = false;
         }
-        auto otherYieldOp = op->getBlock() == ifOp->getBlock()?  cast<scf::YieldOp>(ifOp.elseBlock()->getTerminator()) : cast<scf::YieldOp>(ifOp.thenBlock()->getTerminator());
-        auto opYieldOp = op->getBlock() == ifOp->getBlock()?  cast<scf::YieldOp>(ifOp.elseBlock()->getTerminator()) : cast<scf::YieldOp>(ifOp.thenBlock()->getTerminator());
+        auto otherYieldOp = op->getBlock() == ifOp->getBlock() ? cast<scf::YieldOp>(ifOp.elseBlock()->getTerminator())
+                                                               : cast<scf::YieldOp>(ifOp.thenBlock()->getTerminator());
+        auto opYieldOp = op->getBlock() == ifOp->getBlock() ? cast<scf::YieldOp>(ifOp.elseBlock()->getTerminator())
+                                                            : cast<scf::YieldOp>(ifOp.thenBlock()->getTerminator());
         unsigned resultIdx = -1;
         for (unsigned i = 0; i < otherYieldOp->getNumOperands(); ++i) {
             if (otherYieldOp->getOperand(i) == outerInVal && opYieldOp->getOperand(i) == nextSearchValue) {
@@ -179,8 +173,9 @@ Value searchInArgsChain(Value nextValueOfC, bool &argsLimitedInMatmul, bool &may
         }
         if (resultIdx == -1) {
             argsLimitedInMatmul = false;
+        } else {
+            nextSearchValue = ifOp.getResult(resultIdx);
         }
-        nextSearchValue = ifOp.getResult(resultIdx);
     } else {
         argsLimitedInMatmul = false;
         LOG_DEBUG("WARN: no for/if out to matmul.");
@@ -208,7 +203,7 @@ bool verifyAndHandleLoopCarriedL0C(linalg::MatmulOp matmulOp, PatternRewriter &r
         return true;
     }
 
-    if(!operationIsFillZero(outerInVal.getDefiningOp()) || !hivm::traceDefOp<linalg::MatmulOp>(bias).has_value()) {
+    if (!operationIsFillZero(outerInVal.getDefiningOp()) && !hivm::traceDefOp<linalg::MatmulOp>(bias).has_value()) {
         LOG_DEBUG("Split because bias may not be zero, and the init value is not from matmul: " << matmulOp);
         return true;
     }
