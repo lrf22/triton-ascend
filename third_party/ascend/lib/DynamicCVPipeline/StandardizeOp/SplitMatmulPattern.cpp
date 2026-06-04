@@ -27,11 +27,14 @@
 #include "llvm/Support/Debug.h"
 #include "llvm/Support/LogicalResult.h"
 
+#include "DynamicCVPipeline/PlanComputeBlock/Common.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinAttributeInterfaces.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Matchers.h"
 #include "mlir/IR/OperationSupport.h"
 #include "mlir/Support/LLVM.h"
 
@@ -54,18 +57,21 @@ static bool biasIsZero(Operation *biasDefOp)
         return false;
     }
     auto filledVal = fillOp.getInputs()[0];
-    auto constOp = filledVal.getDefiningOp<arith::ConstantOp>();
-    if (!constOp) {
-        return false;
-    }
-    return mlir::TypeSwitch<TypedAttr, bool>(constOp.getValueAttr())
-        .Case<FloatAttr, IntegerAttr>([](auto intOrFloatAttr) { return intOrFloatAttr.getValue().isZero(); })
-        .Default([](auto) { return false; });
+    return matchPattern(filledVal, m_Zero()) || matchPattern(filledVal, m_AnyZeroFloat());
 }
 
-static bool resultIsUsedByMatmul(Value res)
+static Value getConditionForOuterDefOp(OpBuilder &builder, Operation *outerDefOp)
 {
-    return llvm::any_of(res.getUsers(), [](Operation *op) { return isa<linalg::MatmulOp>(op); });
+    if (auto ifOp = dyn_cast<scf::IfOp>(outerDefOp)) {
+        return ifOp.getCondition();
+    }
+    if (auto forOp = dyn_cast<scf::ForOp>(outerDefOp)) {
+        auto loc = forOp.getLoc();
+        auto diff = builder.create<arith::SubIOp>(loc, forOp.getUpperBound(), forOp.getLowerBound());
+        return builder.create<arith::CmpIOp>(loc, arith::CmpIPredicate::sgt, diff, builder.create<arith::ConstantIntOp>(loc, 0, diff.getType()));
+    }
+    LOG_DEBUG("WARN: Create one always true if");
+    return builder.create<arith::ConstantIntOp>(outerDefOp->getLoc(), 1, 1);
 }
 
 // this generally should always be true, but just for safety...
@@ -73,6 +79,91 @@ static bool isFloatOrInt(RankedTensorType tensorType)
 {
     auto elmType = tensorType.getElementType();
     return isa<FloatType, IntegerType>(elmType);
+}
+
+// 沿着args向外侧找，需要获得三个信息：
+// 1. args仅由matmul使用并更新 bool argsLimitedInMatmul
+// 2. matmul是否是一定执行的 bool mayNotExec
+// 3. 最外层的初始化值 Value outerInVal
+// 4. 最外层的for或者if, 也就是需要插入if/else的地方.
+Value searchInArgsChain(Value nextValueOfC, bool &argsLimitedInMatmul, bool &mayNotExec, Value &outerInVal)
+{
+    llvm::errs() << "Search in args chain, current value: " << nextValueOfC << "\n";
+    if (outerInVal.getDefiningOp()) {
+        return nextValueOfC;
+    }
+    auto op = nextValueOfC.getDefiningOp();
+    auto parentOp = op->getParentOp();
+    Value nextSearchValue = nextValueOfC;
+
+
+    // update mayNotExec
+    if (auto forOp = dyn_cast<scf::ForOp>(parentOp)) {
+        IntegerAttr ubAttr, lbAttr;
+        if (matchPattern(forOp.getUpperBound(), m_Constant(&ubAttr)) &&
+            matchPattern(forOp.getLowerBound(), m_Constant(&lbAttr))) {
+        if (ubAttr.getValue().sle(lbAttr.getValue())) {
+            mayNotExec = true;
+        }
+        } else {
+            mayNotExec = true;
+        }
+    } else if (auto ifOp = dyn_cast<scf::IfOp>(parentOp)) {
+        if (!matchPattern(ifOp.getCondition(), m_One())) {
+            mayNotExec = true;
+        }
+    }
+
+    // update argsLimitedInMatmul
+    if (auto forOp = dyn_cast<scf::ForOp>(parentOp)) {
+        auto blockArg = dyn_cast_if_present<BlockArgument>(outerInVal);
+        if (!blockArg || blockArg.getOwner() != forOp.getBody()) {
+            argsLimitedInMatmul = false;
+            return nextValueOfC;
+        }
+        unsigned argIdx = blockArg.getArgNumber() - 1;
+        for (auto &use : blockArg.getUses()) {
+            auto user = use.getOwner();
+            // Allowed: the op itself (mmad or inner for/if that chains to mmad).
+            auto userInBlock = CVPipeline::getAncestorInBlock(user, op->getBlock());
+            if (userInBlock == op){
+                continue;
+            }
+            else if (auto yieldOp = dyn_cast<scf::YieldOp>(userInBlock)) {
+                argsLimitedInMatmul = (use.getOperandNumber() == argIdx);
+            } else {
+                argsLimitedInMatmul = false;
+            }
+        }
+        outerInVal = forOp.getInitArgs()[argIdx];
+        nextSearchValue = forOp->getResult(argIdx);
+
+    } else if (auto ifOp = dyn_cast<scf::IfOp>(parentOp)) {
+        if (!ifOp.elseBlock()) {
+            argsLimitedInMatmul = false;
+        }
+        auto otherYieldOp = op->getBlock() == ifOp->getBlock()?  cast<scf::YieldOp>(ifOp.elseBlock()->getTerminator()) : cast<scf::YieldOp>(ifOp.thenBlock()->getTerminator());
+        auto opYieldOp = op->getBlock() == ifOp->getBlock()?  cast<scf::YieldOp>(ifOp.elseBlock()->getTerminator()) : cast<scf::YieldOp>(ifOp.thenBlock()->getTerminator());
+        unsigned resultIdx = -1;
+        for (unsigned i = 0; i < otherYieldOp->getNumOperands(); ++i) {
+            if (otherYieldOp->getOperand(i) == outerInVal && opYieldOp->getOperand(i) == nextSearchValue) {
+                resultIdx = i;
+                break;
+            }
+        }
+        if (resultIdx == -1) {
+            argsLimitedInMatmul = false;
+        }
+        nextSearchValue = ifOp.getResult(resultIdx);
+    } else {
+        argsLimitedInMatmul = false;
+        LOG_DEBUG("WARN: no for/if out to matmul.");
+    }
+
+    if (argsLimitedInMatmul == false) {
+        return nextValueOfC; // early return
+    }
+    return searchInArgsChain(nextSearchValue, argsLimitedInMatmul, mayNotExec, outerInVal);
 }
 
 /**
@@ -88,24 +179,20 @@ static bool isFloatOrInt(RankedTensorType tensorType)
  *    - The matmul must operate on tensors (tensor mode).
  *    - The element type of the output must be an integer or a float type.
  *
- * 2. Rule 1: Downstream Consumption
- *    - If the matmul output is directly consumed by another matmul, split the operation
- *      to optimize pipeline scheduling and dependencies across sequential GEMM layers.
- *
- * 3. Rule 2: Dynamic / Block Argument Accumulator
+ * 2. Rule 1: Dynamic / Block Argument Accumulator
  *    - If the bias tensor is a block argument (i.e., it has no defining operation in the
  *      current block), its compile-time value is unknown. We conservatively assume it is
  *      non-zero and trigger a split.
  *
- * 4. Rule 3: Zero-Accumulator Bypass (Do Not Split)
+ * 3. Rule 2: Zero-Accumulator Bypass (Do Not Split)
  *    - If the bias tensor is statically known to be a constant zero (e.g., initialized via
  *      linalg.fill with 0), the split is bypassed. Standard lowerings already optimize
  *      this cleanly without introducing a redundant vector addition.
  *
- * 5. Default Split:
+ * 4. Default Split:
  *    - If the bias is defined, non-zero, and does not fall under Rule 3, split the operation.
  */
-static bool shouldSplit(linalg::MatmulOp matmulOp)
+static bool shouldSplit(linalg::MatmulOp matmulOp, OpBuilder builder)
 {
     auto inits = matmulOp.getDpsInits();
     auto inputs = matmulOp.getDpsInputs();
@@ -125,21 +212,40 @@ static bool shouldSplit(linalg::MatmulOp matmulOp)
         return false;
     }
 
-    // Rule 1: result is used by another matmul -> split
-    if (resultIsUsedByMatmul(matmulOp.getResult(0))) {
-        LOG_DEBUG("Split because result is used by another matmul: " << matmulOp);
-        return true;
-    }
-
-    // Rule 2: bias is block arg -> split
     auto *biasDefOp = bias.getDefiningOp();
+    // Rule 1: bias is block arg -> split
     if (!biasDefOp) {
-        LOG_DEBUG("Split because bias is block arg: " << matmulOp);
-        // no defining op, split
-        return true;
+        bool argsLimitedInMatmul = true;
+        bool mayNotExec = false;
+        Value outerInVal = bias;
+        auto outerValue = searchInArgsChain(matmulOp.getResult(0), argsLimitedInMatmul, mayNotExec, outerInVal);
+        auto *outerDefOp = outerValue.getDefiningOp();
+        if (!argsLimitedInMatmul) {
+            LOG_DEBUG("Split because bias is not limited in args" << matmulOp);
+            return true;
+        }
+        if(!biasIsZero(outerInVal.getDefiningOp())) {
+            LOG_DEBUG("Split because bias may not be zero: " << matmulOp);
+            return true;
+        }
+        if (mayNotExec) {
+            builder.setInsertionPointAfter(outerDefOp);
+            auto cond = getConditionForOuterDefOp(builder, outerDefOp);
+            auto ifOp = builder.create<scf::IfOp>(outerDefOp->getLoc(), TypeRange{outerInVal.getType()}, cond, true);
+            builder.setInsertionPointToStart(ifOp.thenBlock());
+            auto *clonedOp = outerInVal.getDefiningOp()->clone();
+            builder.insert(clonedOp);
+            builder.create<scf::YieldOp>(outerDefOp->getLoc(), clonedOp->getResult(0));
+            builder.setInsertionPointToEnd(ifOp.elseBlock());
+            builder.create<scf::YieldOp>(outerDefOp->getLoc(), outerInVal);
+            outerInVal.replaceAllUsesWith(ifOp.getResult(0));
+            LOG_DEBUG("Split because bias may not exec");
+        }
+        LOG_DEBUG("Not Split because bias can remain in L0C" << matmulOp);
+        return false;
     }
 
-    // Rule 3: matmul a b 0 -> do not split
+    // Rule 2: matmul a b 0 -> do not split
     if (biasIsZero(biasDefOp)) {
         LOG_DEBUG("Not split because bias is zero: " << matmulOp);
         return false;
@@ -257,7 +363,7 @@ static void splitMatmul(linalg::MatmulOp matmulOp, PatternRewriter &rewriter)
 
 LogicalResult SplitMatmulPattern::matchAndRewrite(linalg::MatmulOp matmulOp, PatternRewriter &rewriter) const
 {
-    if (!shouldSplit(matmulOp)) {
+    if (!shouldSplit(matmulOp, rewriter)) {
         return failure();
     }
 

@@ -71,10 +71,11 @@ std::optional<int64_t> getOpBlockId(Operation *op);
 llvm::LogicalResult verifyOpBlockId(Operation *op);
 int getAvailableBlockId(ModuleOp module);
 void setFallbackAttr(ModuleOp module);
+bool isScfOp(Operation *op);
 
 inline bool isCubeOp(Operation *op)
 {
-    return CVPipeline::getOpCoreType(op) == CoreType::CUBE_ONLY;
+    return !isScfOp(op) && CVPipeline::getOpCoreType(op) == CoreType::CUBE_ONLY;
 }
 
 bool isVectorOnlyOp(Operation *op);
