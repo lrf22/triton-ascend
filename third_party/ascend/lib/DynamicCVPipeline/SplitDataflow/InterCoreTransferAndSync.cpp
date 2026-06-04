@@ -664,7 +664,7 @@ mlir::Operation *InterCoreTransferAndSyncPass::getConsumerWaitPoint(int transfer
 
 Operation *InterCoreTransferAndSyncPass::insertVectorToCubeTransfer(OpBuilder &builder, Value srcValue,
     Value normalizedValue, Operation *vectorEndOp, Operation *cubeStartOp, Location loc, int transferIndex,
-    int iniConsumerId, Operation **consumedDataOp)
+    int iniConsumerId, DependencyInfo &dep, Operation **consumedDataOp)
 {
     LOG_DEBUG("Inserting [Vector->Cube] transfer for value: " << srcValue << "\n");
     // Step 1: Get input information (2D tensor: MxN)
@@ -705,6 +705,9 @@ Operation *InterCoreTransferAndSyncPass::insertVectorToCubeTransfer(OpBuilder &b
     LOG_DEBUG("[toTensorOp]: " << *toTensorOp << "\n");
 
     llvm::SmallVector<Operation *> users(srcValue.getUsers().begin(), srcValue.getUsers().end());
+    if (dep.consumerYieldOp) {
+        dep.consumerYieldOp->replaceUsesOfWith(srcValue, toTensorOp.getResult());
+    }
     for (Operation *user : users) {
         LOG_DEBUG("[v->c user]" << *user << "\n");
         auto userBlockIdOpt = CVPipeline::getOpBlockId(user);
@@ -719,7 +722,7 @@ Operation *InterCoreTransferAndSyncPass::insertVectorToCubeTransfer(OpBuilder &b
 }
 
 Operation *InterCoreTransferAndSyncPass::insertCubeToVectorTransfer(OpBuilder &builder, Value srcValue,
-    Operation *cubeEndOp, Operation *vectorStartOp, Location loc, int transferIndex, int iniConsumerId,
+    Operation *cubeEndOp, Operation *vectorStartOp, Location loc, int transferIndex, int iniConsumerId, DependencyInfo &dep,
     Operation **consumedDataOp)
 {
     LOG_DEBUG("Inserting [Cube->Vector] transfer for value: " << srcValue << "\n");
@@ -727,8 +730,7 @@ Operation *InterCoreTransferAndSyncPass::insertCubeToVectorTransfer(OpBuilder &b
     int64_t M = srcTensorType.getDimSize(0);
     int64_t N = srcTensorType.getDimSize(1);
     Type elemType = srcTensorType.getElementType();
-
-    int cubeBlockId = static_cast<int>(CVPipeline::getOpBlockId(srcValue.getDefiningOp()).value_or(-1));
+    int cubeBlockId = static_cast<int>(CVPipeline::getOpBlockId(cubeEndOp).value_or(-1));
     int vecBlockId = static_cast<int>(CVPipeline::getOpBlockId(vectorStartOp).value_or(-1));
 
     auto [cubeAllocOp, vecAllocOp] = createTransferAllocs(builder, loc, { M, N }, elemType, hivm::AddressSpace::UB,
@@ -757,6 +759,9 @@ Operation *InterCoreTransferAndSyncPass::insertCubeToVectorTransfer(OpBuilder &b
     LOG_DEBUG("[toTensorOp]: " << *toTensorOp << "\n");
 
     llvm::SmallVector<Operation *> users(srcValue.getUsers().begin(), srcValue.getUsers().end());
+    if (dep.consumerYieldOp) {
+        dep.consumerYieldOp->replaceUsesOfWith(srcValue, toTensorOp.getResult());
+    }
     for (Operation *user : users) {
         LOG_DEBUG("[c->v user]" << *user << "\n");
         auto userBlockIdOpt = CVPipeline::getOpBlockId(user);
@@ -1029,10 +1034,12 @@ LogicalResult InterCoreTransferAndSyncPass::handleVectorToCube(OpBuilder &builde
   
     if (dep.consumerBlockId == dep.iniConsumerBlockId) {
         auto consumerPoint = analyzeConsumerReadInsertPoint(srcValue, dep.iniConsumerBlockId);
-        consStart = consumerPoint;
+        if (consumerPoint) {
+            consStart = consumerPoint;
+        }
     }
     Operation *transferOp = insertVectorToCubeTransfer(builder, srcValue, normalizedVal, prodEnd, consStart, loc,
-        transferIndex, dep.iniConsumerBlockId, &consumedDataOp);
+        transferIndex, dep.iniConsumerBlockId, dep, &consumedDataOp);
 
     int flagId = flagManager.acquireId(prodStart);
     auto [newProdStart, newProdEnd] = getBlockStartEnd(dep.producerBlockId, module);
@@ -1040,7 +1047,9 @@ LogicalResult InterCoreTransferAndSyncPass::handleVectorToCube(OpBuilder &builde
 
     if (dep.consumerBlockId == dep.iniConsumerBlockId) {
         auto newconsumerPoint = getConsumerWaitPoint(transferIndex);
-        newConsStart = newconsumerPoint;
+        if (newconsumerPoint) {
+            newConsStart = newconsumerPoint;
+        }
     }
 
     insertInterCoreSync(builder, transferOp, newConsStart, newConsEnd, flagId, loc, transferIndex, flagIdReuseManager,
@@ -1072,12 +1081,15 @@ LogicalResult InterCoreTransferAndSyncPass::handleCubeToVector(OpBuilder &builde
 
     if (dep.consumerBlockId == dep.iniConsumerBlockId) {
         auto consumerPoint = analyzeConsumerReadInsertPoint(srcValue, dep.iniConsumerBlockId);
-        consStart = consumerPoint;
+        if (consumerPoint) {
+            consStart = consumerPoint;
+        }
     }
-
+    LOG_DEBUG(*consStart);
+    LOG_DEBUG(*prodEnd);
     Operation *consumedDataOp = nullptr;
     Operation *transferOp =
-        insertCubeToVectorTransfer(builder, srcValue, prodEnd, consStart, loc, transferIndex, dep.iniConsumerBlockId,
+        insertCubeToVectorTransfer(builder, srcValue, prodEnd, consStart, loc, transferIndex, dep.iniConsumerBlockId, dep,
             &consumedDataOp);
 
     auto [newProdStart, newProdEnd] = getBlockStartEnd(dep.producerBlockId, module); // C Block
@@ -1085,9 +1097,12 @@ LogicalResult InterCoreTransferAndSyncPass::handleCubeToVector(OpBuilder &builde
 
     if (dep.consumerBlockId == dep.iniConsumerBlockId) {
         auto newconsumerPoint = getConsumerWaitPoint(transferIndex);
-        newConsStart = newconsumerPoint;
+        if (newconsumerPoint) {
+            newConsStart = newconsumerPoint;
+        }
     }
-
+    LOG_DEBUG(*newConsStart);
+    LOG_DEBUG(*newConsEnd);
     int flagId = flagManager.acquireId(newProdStart);
     insertInterCoreSync(builder, transferOp, newConsStart, newConsEnd, flagId, loc, transferIndex, flagIdReuseManager,
         consumedDataOp);
