@@ -23,19 +23,24 @@
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "llvm/IR/Verifier.h"
 #include "llvm/Support/Casting.h"
 #include "llvm/Support/Debug.h"
+#include "llvm/Support/Error.h"
 #include "llvm/Support/LogicalResult.h"
 
 #include "DynamicCVPipeline/PlanComputeBlock/Common.h"
+#include "bishengir/Dialect/HIVM/IR/HIVMImpl.h"
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Linalg/IR/Linalg.h"
 #include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinAttributeInterfaces.h"
 #include "mlir/IR/BuiltinAttributes.h"
 #include "mlir/IR/BuiltinTypes.h"
+#include "mlir/IR/Dominance.h"
 #include "mlir/IR/Matchers.h"
 #include "mlir/IR/OperationSupport.h"
+#include "mlir/IR/PatternMatch.h"
 #include "mlir/Support/LLVM.h"
 
 #include "ascend/include/DynamicCVPipeline/StandardizeOp/PatternMatchRewrites.h"
@@ -49,10 +54,32 @@ using namespace CVSplit;
 static constexpr const char *DEBUG_TYPE = "SplitMatmul";
 #define LOG_DEBUG(...) LLVM_DEBUG(llvm::dbgs() << "\n[" << DEBUG_TYPE << "] " << __VA_ARGS__ << "\n")
 
-// the user is responsible for checking biasDefOp is not null
-static bool biasIsZero(Operation *biasDefOp)
+namespace {
+
+struct MatmulInputs {
+    Value a;
+    Value b;
+    Value bias;
+};
+
+}
+
+static inline MatmulInputs parseMatmulInputs(linalg::MatmulOp matmulOp)
 {
-    auto fillOp = dyn_cast<linalg::FillOp>(biasDefOp);
+    auto inits = matmulOp.getDpsInits();
+    auto inputs = matmulOp.getDpsInputs();
+
+    return {
+      inputs[0],
+      inputs[1],
+      inits[0]
+    };
+}
+
+// the user is responsible for checking biasDefOp is not null
+static bool operationIsFillZero(Operation *op)
+{
+    auto fillOp = dyn_cast<linalg::FillOp>(op);
     if (!fillOp) {
         return false;
     }
@@ -88,7 +115,7 @@ static bool isFloatOrInt(RankedTensorType tensorType)
 // 4. 最外层的for或者if, 也就是需要插入if/else的地方.
 Value searchInArgsChain(Value nextValueOfC, bool &argsLimitedInMatmul, bool &mayNotExec, Value &outerInVal)
 {
-    llvm::errs() << "Search in args chain, current value: " << nextValueOfC << "\n";
+    // llvm::errs() << "Search in args chain, current value: " << nextValueOfC << "\n";
     if (outerInVal.getDefiningOp()) {
         return nextValueOfC;
     }
@@ -137,7 +164,6 @@ Value searchInArgsChain(Value nextValueOfC, bool &argsLimitedInMatmul, bool &may
         }
         outerInVal = forOp.getInitArgs()[argIdx];
         nextSearchValue = forOp->getResult(argIdx);
-
     } else if (auto ifOp = dyn_cast<scf::IfOp>(parentOp)) {
         if (!ifOp.elseBlock()) {
             argsLimitedInMatmul = false;
@@ -166,6 +192,37 @@ Value searchInArgsChain(Value nextValueOfC, bool &argsLimitedInMatmul, bool &may
     return searchInArgsChain(nextSearchValue, argsLimitedInMatmul, mayNotExec, outerInVal);
 }
 
+bool verifyAndHandleLoopCarriedL0C(linalg::MatmulOp matmulOp, PatternRewriter &rewriter, Value bias)
+{
+    if (matmulOp->hasAttr(CVPipeline::kLoopCarriedL0C)) {
+        return false;
+    }
+
+    bool argsLimitedInMatmul = true;
+    bool mayNotExec = false;
+    Value outerInVal = bias;
+    auto outerValue = searchInArgsChain(matmulOp.getResult(0), argsLimitedInMatmul, mayNotExec, outerInVal);
+    auto *outerDefOp = outerValue.getDefiningOp();
+    if (!argsLimitedInMatmul) {
+        LOG_DEBUG("Split because bias is not limited in args" << matmulOp);
+        return true;
+    }
+
+    if(!operationIsFillZero(outerInVal.getDefiningOp()) || !hivm::traceDefOp<linalg::MatmulOp>(bias).has_value()) {
+        LOG_DEBUG("Split because bias may not be zero, and the init value is not from matmul: " << matmulOp);
+        return true;
+    }
+
+    matmulOp->setAttr(CVPipeline::kLoopCarriedL0C, rewriter.getUnitAttr());
+
+    if (mayNotExec) {
+        LOG_DEBUG("Split because the for loop may not execute");
+        return true;
+    }
+    LOG_DEBUG("Not Split because bias can remain in L0C" << matmulOp);
+    return false;
+}
+
 /**
  * @brief Evaluates whether a Matmul operation is a candidate for splitting.
  *
@@ -192,67 +249,24 @@ Value searchInArgsChain(Value nextValueOfC, bool &argsLimitedInMatmul, bool &may
  * 4. Default Split:
  *    - If the bias is defined, non-zero, and does not fall under Rule 3, split the operation.
  */
-static bool shouldSplit(linalg::MatmulOp matmulOp, OpBuilder builder)
+static bool shouldSplit(linalg::MatmulOp matmulOp, PatternRewriter &rewriter)
 {
-    auto inits = matmulOp.getDpsInits();
-    auto inputs = matmulOp.getDpsInputs();
-    if (inits.empty() || inputs.size() < 2) {
-        LOG_DEBUG("Not split because op is illegal: " << matmulOp);
-        return false;
-    }
-
-    auto bias = matmulOp.getDpsInits()[0];
-    auto outputType = dyn_cast<RankedTensorType>(bias.getType());
-    if (!outputType) {
-        LOG_DEBUG("Not split because not tensor mode matmul: " << matmulOp);
-        return false;
-    }
-    if (!isFloatOrInt(outputType)) {
-        LOG_DEBUG("Not split because not integer or float: " << matmulOp);
-        return false;
-    }
-
+    auto bias = parseMatmulInputs(matmulOp).bias;
     auto *biasDefOp = bias.getDefiningOp();
     // Rule 1: bias is block arg -> split
     if (!biasDefOp) {
-        bool argsLimitedInMatmul = true;
-        bool mayNotExec = false;
-        Value outerInVal = bias;
-        auto outerValue = searchInArgsChain(matmulOp.getResult(0), argsLimitedInMatmul, mayNotExec, outerInVal);
-        auto *outerDefOp = outerValue.getDefiningOp();
-        if (!argsLimitedInMatmul) {
-            LOG_DEBUG("Split because bias is not limited in args" << matmulOp);
-            return true;
-        }
-        if(!biasIsZero(outerInVal.getDefiningOp())) {
-            LOG_DEBUG("Split because bias may not be zero: " << matmulOp);
-            return true;
-        }
-        if (mayNotExec) {
-            builder.setInsertionPointAfter(outerDefOp);
-            auto cond = getConditionForOuterDefOp(builder, outerDefOp);
-            auto ifOp = builder.create<scf::IfOp>(outerDefOp->getLoc(), TypeRange{outerInVal.getType()}, cond, true);
-            builder.setInsertionPointToStart(ifOp.thenBlock());
-            auto *clonedOp = outerInVal.getDefiningOp()->clone();
-            builder.insert(clonedOp);
-            builder.create<scf::YieldOp>(outerDefOp->getLoc(), clonedOp->getResult(0));
-            builder.setInsertionPointToEnd(ifOp.elseBlock());
-            builder.create<scf::YieldOp>(outerDefOp->getLoc(), outerInVal);
-            outerInVal.replaceAllUsesWith(ifOp.getResult(0));
-            LOG_DEBUG("Split because bias may not exec");
-        }
-        LOG_DEBUG("Not Split because bias can remain in L0C" << matmulOp);
-        return false;
+        return verifyAndHandleLoopCarriedL0C(matmulOp, rewriter, bias);
     }
 
     // Rule 2: matmul a b 0 -> do not split
-    if (biasIsZero(biasDefOp)) {
+    if (operationIsFillZero(biasDefOp)) {
         LOG_DEBUG("Not split because bias is zero: " << matmulOp);
         return false;
     }
 
     // Otherwise split:
     LOG_DEBUG("Should split: " << matmulOp);
+
     return true;
 }
 
@@ -298,6 +312,7 @@ static void splitMatmul(linalg::MatmulOp matmulOp, PatternRewriter &rewriter)
     auto inputs = matmulOp.getDpsInputs();
     auto a = inputs[0];
     auto b = inputs[1];
+
     // this is the accumulator/out operand, not result in tensor mode
     auto bias = matmulOp.getDpsInits()[0];
 
@@ -361,8 +376,35 @@ static void splitMatmul(linalg::MatmulOp matmulOp, PatternRewriter &rewriter)
     rewriter.replaceOp(matmulOp, addOp);
 }
 
+bool verifyMatmul(linalg::MatmulOp matmulOp)
+{
+    auto inits = matmulOp.getDpsInits();
+    auto inputs = matmulOp.getDpsInputs();
+    if (inits.empty() || inputs.size() < 2) {
+        LOG_DEBUG("Not split because op is illegal: " << matmulOp);
+        return false;
+    }
+
+    auto bias = matmulOp.getDpsInits()[0];
+    auto outputType = dyn_cast<RankedTensorType>(bias.getType());
+    if (!outputType) {
+        LOG_DEBUG("Not split because not tensor mode matmul: " << matmulOp);
+        return false;
+    }
+    if (!isFloatOrInt(outputType)) {
+        LOG_DEBUG("Not split because not integer or float: " << matmulOp);
+        return false;
+    }
+
+    return true;
+}
+
 LogicalResult SplitMatmulPattern::matchAndRewrite(linalg::MatmulOp matmulOp, PatternRewriter &rewriter) const
 {
+    if (!verifyMatmul(matmulOp)) {
+        return failure();
+    }
+
     if (!shouldSplit(matmulOp, rewriter)) {
         return failure();
     }

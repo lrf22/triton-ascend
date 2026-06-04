@@ -31,6 +31,7 @@
 #include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/MemRef/IR/MemRef.h"
+#include "mlir/Dialect/SCF/IR/SCF.h"
 #include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/Interfaces/CastInterfaces.h"
@@ -394,9 +395,51 @@ int OpClassifierPass::patternMatchCUBE()
         // ---- Downstream pattern matching ----
         for (Value result : op->getResults()) {
             for (Operation *user : result.getUsers()) {
-                matchStorePattern(user);
-                matchExtractSlicePattern(user);
-                matchMaterializePattern(user);
+                // If user is scf.yield, follow the chain to find real users
+                Operation *curUser = user;
+                while (curUser) {
+                    if (auto yieldOp = dyn_cast<scf::YieldOp>(curUser)) {
+                        if (Operation *scfOp = yieldOp->getParentOp()) {
+                            // Find which operand index the previous result corresponds to in the yield
+                            unsigned yieldOperandIdx = 0;
+                            Value prevResult = result;
+                            for (unsigned i = 0; i < yieldOp->getNumOperands(); ++i) {
+                                if (yieldOp->getOperand(i) == prevResult) {
+                                    yieldOperandIdx = i;
+                                    break;
+                                }
+                            }
+                            // Get the corresponding scf result
+                            if (yieldOperandIdx < scfOp->getNumResults()) {
+                                Value scfResult = scfOp->getResult(yieldOperandIdx);
+                                prevResult = scfResult;
+                                // Find the next user (skipping yield)
+                                curUser = nullptr;
+                                for (Operation *nextUser : scfResult.getUsers()) {
+                                    if (!isa<scf::YieldOp>(nextUser)) {
+                                        curUser = nextUser;
+                                        break;
+                                    }
+                                }
+                                // If no non-yield user found, continue searching from yield
+                                if (!curUser) {
+                                    for (Operation *nextUser : scfResult.getUsers()) {
+                                        if (isa<scf::YieldOp>(nextUser)) {
+                                            curUser = nextUser;
+                                            break;
+                                        }
+                                    }
+                                }
+                                continue;
+                            }
+                        }
+                        break;
+                    }
+                    matchStorePattern(curUser);
+                    matchExtractSlicePattern(curUser);
+                    matchMaterializePattern(curUser);
+                    break;
+                }
             }
         }
     }
