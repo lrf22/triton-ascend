@@ -51,7 +51,7 @@ struct BlockInfo {
 struct DependencyInfo {
   DependencyType type;
   mlir::Value value;
-
+  bool isScaler = false;
   int producerBlockId;
   int consumerBlockId;
   int iniProducerBlockId;
@@ -137,6 +137,7 @@ private:
     bool isCubeOrVectorOp(mlir::Operation *op);
     bool isValidShapeForDependency(mlir::Value value);
     bool isValidValueForDependency(mlir::Value value);
+    bool isValidScalarDependency(mlir::Value value);
     bool isOuterOpArg(mlir::Value value);
     void processIterArgDependencies();
     llvm::SmallVector<mlir::Operation *> collectDiffCoreTypeUsers(
