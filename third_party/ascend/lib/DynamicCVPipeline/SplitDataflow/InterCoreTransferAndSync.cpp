@@ -772,10 +772,10 @@ void InterCoreTransferAndSyncPass::insertInterCoreSync(
         srcCoreType = "VECTOR";
         dstCoreType = "CUBE";
     } else if (isa<LLVM::StoreOp>(transferOp)) {
-        forReadTPipe = pipeSAttr;
-        forReadPipe = pipeSAttr;
-        forWriteTPipe = pipeSAttr;
-        forWritePipe = pipeSAttr;
+        forReadTPipe = pipeVAttr;
+        forReadPipe = pipeFixAttr;
+        forWriteTPipe = pipeFixAttr;
+        forWritePipe = pipeVAttr;
         srcCoreAttr = vecCoreAttr;
         dstCoreAttr = cubeCoreAttr;
         srcCoreType = "VECTOR";
