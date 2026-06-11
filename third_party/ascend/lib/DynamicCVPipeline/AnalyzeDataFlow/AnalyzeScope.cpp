@@ -150,12 +150,6 @@ static LogicalResult verifyMainLoop(ModuleOp module)
     return failure();
   }
 
-  if (!checkVecScopeMainLoop(module)) {
-    LDBG("[INFO]: No op beside matmul add in vector main loop.");
-    CVPipeline::setFallbackAttr(module);
-    return failure();
-  };
-
   return success();
 }
 
