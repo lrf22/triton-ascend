@@ -57,6 +57,8 @@ struct DependencyInfo {
   int iniProducerBlockId;
   int iniConsumerBlockId;
 
+  // Optional Items for iterarg yield dependency
+  mlir::Operation *consumerYieldOp = nullptr;
   // Optional Items for V2CDependencies
   mlir::Operation *iniMatmulOp = nullptr;
   bool isMatmulA = false;
@@ -156,6 +158,12 @@ private:
                                      llvm::StringRef initCoreType,
                                      llvm::SmallVector<mlir::Operation *> &diffUsers,
                                      DataDependencyInfo &info);
+    void insertConsumerAndRecordDeps(scf::ForOp forOp, mlir::Value yieldedValue,
+                                          int iterArgIndex, llvm::StringRef initCoreType,
+                                          DataDependencyInfo &info);
+    void recordInitValueDeps(scf::ForOp forOp, mlir::Value initValue,
+                             llvm::StringRef yieldCoreType,
+                             DataDependencyInfo &info);
 
   mlir::ModuleOp module;
 };
