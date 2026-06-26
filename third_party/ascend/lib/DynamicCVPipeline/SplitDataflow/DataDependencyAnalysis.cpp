@@ -84,6 +84,32 @@ llvm::StringRef getCoreTypeWithIndex(Operation *op, int index)
     return typeStr;
 }
 
+void updateCoreTypeAtIndex(Operation *op, int index, llvm::StringRef newCoreType)
+{
+    auto coreTypeAttr = op->getAttrOfType<mlir::StringAttr>(CVPipeline::kCoreType);
+    if (!coreTypeAttr) {
+        LOG_DEBUG("[warning]: failed to rewrite coretype\n");
+        return;
+    }
+
+    llvm::StringRef typeStr = coreTypeAttr.getValue();
+    if (typeStr.contains(", ")) {
+        llvm::SmallVector<llvm::StringRef> types;
+        typeStr.split(types, ", ", -1, false);
+        if (index < static_cast<int>(types.size())) {
+            types[index] = newCoreType;
+        }
+        std::string newTypeStr;
+        for (size_t i = 0; i < types.size(); ++i) {
+            if (i > 0) newTypeStr += ", ";
+            newTypeStr += types[i].str();
+        }
+        op->setAttr(CVPipeline::kCoreType, StringAttr::get(op->getContext(), newTypeStr));
+    } else {
+        op->setAttr(CVPipeline::kCoreType, StringAttr::get(op->getContext(), newCoreType));
+    }
+}
+
 // Helper: Check if operation is control flow
 bool DataDependencyAnalysisPass::isControlFlowOp(mlir::Operation *op)
 {
@@ -337,6 +363,7 @@ void DataDependencyAnalysisPass::insertProducerAndRecordDeps(scf::ForOp forOp,
     blockInfo.Operations.push_back(constOp);
     blockInfoMap[newId] = blockInfo;
 
+    llvm::DenseSet<int> processedUserBlockIds;
     for (auto &user : diffUsers) {
         auto userBlockIdOpt = CVPipeline::getOpBlockId(user);
         if (!userBlockIdOpt) {
@@ -344,8 +371,10 @@ void DataDependencyAnalysisPass::insertProducerAndRecordDeps(scf::ForOp forOp,
             continue;
         }
         int userBlockId = *userBlockIdOpt;
+        if (!processedUserBlockIds.insert(userBlockId).second) {
+            continue;
+        }
 
-        // Determine dependency type based on initCoreType
         DependencyType depType;
         if (initCoreType == ssbufferCoreTypeVectorAttr) {
             depType = DependencyType::VectorToCube;
@@ -356,29 +385,107 @@ void DataDependencyAnalysisPass::insertProducerAndRecordDeps(scf::ForOp forOp,
             continue;
         }
 
-        // Record dependency
-        DependencyInfo depInfo;
-        depInfo.type = depType;
-        depInfo.value = iterArg;
-        depInfo.iniProducerBlockId = newId;
-        depInfo.iniConsumerBlockId = userBlockId;
-
-        auto [producerBlockId, consumerBlockId] = findCommonLevelBlockIds(info, newId, userBlockId);
-        depInfo.producerBlockId = producerBlockId;
-        depInfo.consumerBlockId = consumerBlockId;
-        if (isValidBroadcastValueForDependency(iterArg)) {
-            depInfo.isUsedInMmadBias = true;
-        }
-        if (depType == DependencyType::VectorToCube) {
-            v2cDependencies.push_back(depInfo);
-        } else {
-            c2vDependencies.push_back(depInfo);
-        }
+        auto &targetDeps = (depType == DependencyType::VectorToCube) ? v2cDependencies : c2vDependencies;
+        collectDepInfo(iterArg, depType, targetDeps, newId, userBlockId, info);
 
         LOG_DEBUG("Recorded iterArg dependency: " << initCoreType << " -> "
             << (depType == DependencyType::VectorToCube ? ssbufferCoreTypeCubeAttr : ssbufferCoreTypeVectorAttr)
             << ", producerBlockId=" << newId << ", consumerBlockId=" << userBlockId << "\n");
     }
+}
+
+void DataDependencyAnalysisPass::insertConsumerAndRecordDeps(scf::ForOp forOp,
+    mlir::Value yieldedValue, int iterArgIndex, llvm::StringRef initCoreType, DataDependencyInfo &info)
+{
+    auto &v2cDependencies = info.getV2CDependencies();
+    auto &c2vDependencies = info.getC2VDependencies();
+    auto &blockInfoMap = info.getBlockInfoMap();
+
+    int newId = CVPipeline::getAvailableBlockId(module);
+    auto yieldOp = cast<scf::YieldOp>(forOp.getBody()->getTerminator());
+    OpBuilder builder(yieldOp);
+    Location loc = yieldOp.getLoc();
+    auto constOp = builder.create<arith::ConstantIntOp>(loc, 0, 32);
+    constOp->setAttr(CVPipeline::kBlockId, IntegerAttr::get(IntegerType::get(builder.getContext(), 32), newId));
+    constOp->setAttr(CVPipeline::kCoreType, StringAttr::get(builder.getContext(), initCoreType));
+
+    BlockInfo blockInfo;
+    blockInfo.blockId = newId;
+    blockInfo.isCube = (initCoreType == ssbufferCoreTypeCubeAttr);
+    blockInfo.isControl = false;
+    blockInfo.Operations.push_back(constOp);
+    blockInfoMap[newId] = blockInfo;
+
+    Operation *yieldedDefOp = yieldedValue.getDefiningOp();
+    auto yieldedDefBlockIdOpt = CVPipeline::getOpBlockId(yieldedDefOp);
+    if (!yieldedDefBlockIdOpt) {
+        LOG_DEBUG("Warning: Yielded defining op block ID not found.\n");
+        return;
+    }
+    int yieldedDefBlockId = static_cast<int>(*yieldedDefBlockIdOpt);
+
+    DependencyType depType;
+    if (initCoreType == ssbufferCoreTypeVectorAttr) {
+        depType = DependencyType::CubeToVector;
+    } else if (initCoreType == ssbufferCoreTypeCubeAttr) {
+        depType = DependencyType::VectorToCube;
+    } else {
+        LOG_DEBUG("Warning: Unknown initCoreType: " << initCoreType << "\n");
+        return;
+    }
+
+    auto &targetDeps = (depType == DependencyType::VectorToCube) ? v2cDependencies : c2vDependencies;
+    LOG_DEBUG("iniProducerBlockId=" << yieldedDefBlockId << ", iniConsumerBlockId=" << newId << "\n");
+    collectDepInfo(yieldedValue, depType, targetDeps, yieldedDefBlockId, newId, info);
+    targetDeps.back().consumerYieldOp = yieldOp;
+    
+    updateCoreTypeAtIndex(yieldOp, iterArgIndex, initCoreType);
+    updateCoreTypeAtIndex(forOp, iterArgIndex, initCoreType);
+
+    LOG_DEBUG("Recorded yield producer dependency: " << initCoreType
+        << ", iniProducerBlockId=" << yieldedDefBlockId
+        << ", iniConsumerBlockId=" << newId << "\n");
+
+}
+
+void DataDependencyAnalysisPass::recordInitValueDeps(scf::ForOp forOp,
+    mlir::Value initValue, llvm::StringRef yieldCoreType, DataDependencyInfo &info)
+{
+    auto &v2cDependencies = info.getV2CDependencies();
+    auto &c2vDependencies = info.getC2VDependencies();
+
+    Operation *initDefOp = initValue.getDefiningOp();
+    auto initDefBlockIdOpt = CVPipeline::getOpBlockId(initDefOp);
+    if (!initDefBlockIdOpt) {
+        LOG_DEBUG("Warning: Init defining op block ID not found.\n");
+        return;
+    }
+    int initDefBlockId = static_cast<int>(*initDefBlockIdOpt);
+
+    auto forOpBlockIdOpt = CVPipeline::getOpBlockId(forOp);
+    if (!forOpBlockIdOpt) {
+        LOG_DEBUG("Warning: ForOp block ID not found.\n");
+        return;
+    }
+    int forOpBlockId = static_cast<int>(*forOpBlockIdOpt);
+
+    DependencyType depType;
+    if (yieldCoreType == ssbufferCoreTypeVectorAttr) {
+        depType = DependencyType::CubeToVector;
+    } else if (yieldCoreType == ssbufferCoreTypeCubeAttr) {
+        depType = DependencyType::VectorToCube;
+    } else {
+        LOG_DEBUG("Warning: Unknown yieldCoreType: " << yieldCoreType << "\n");
+        return;
+    }
+
+    auto &targetDeps = (depType == DependencyType::VectorToCube) ? v2cDependencies : c2vDependencies;
+    LOG_DEBUG("iniProducerBlockId=" << initDefBlockId << ", iniConsumerBlockId=" << forOpBlockId << "\n");
+    collectDepInfo(initValue, depType, targetDeps, initDefBlockId, forOpBlockId, info);
+
+    LOG_DEBUG("Recorded init value dependency: " << yieldCoreType
+        << ", iniProducerBlockId=" << initDefBlockId
+        << ", iniConsumerBlockId=" << forOpBlockId << "\n");
 }
 
 // Process iterArg dependencies for all scf.for operations in the module.
@@ -429,21 +536,48 @@ void DataDependencyAnalysisPass::processIterArgDependencies()
             auto initCoreType = getCoreTypeWithIndex(initDefOp, initDefResult ? initDefResult.getResultNumber() : 0);
             auto yieldCoreType = getCoreTypeWithIndex(forOp, iterArgIndex);
 
-            // Only process if init and yield have matching core types
-            // Mismatch indicates a more complex dependency pattern that requires special handling
+            if (isa<arith::ConstantOp, tensor::EmptyOp, linalg::FillOp>(initDefOp)) {
+                continue;
+            }
+            LOG_DEBUG("[initDefOp]: " << *initDefOp << "\n");
             if (initCoreType != yieldCoreType) {
-                if (!isValidValueForDependency(initValue)) {
-                    if (collectDiffCoreTypeUsers(iterArg, yieldCoreType).empty()) {
+                llvm::SmallVector<mlir::Operation *> initCoreTypeUsers;
+                llvm::SmallVector<mlir::Operation *> yieldCoreTypeUsers;
+
+                for (mlir::Operation *user : iterArg.getUsers()) {
+                    if (isa<scf::YieldOp>(user)) {
                         continue;
                     }
-                }
-                LOG_DEBUG("iterarg init core_type conflicts with yield");
-                signalPassFailure();
-            }
 
-            auto diffUsers = collectDiffCoreTypeUsers(iterArg, initCoreType);
-            if (!diffUsers.empty()) {
-                insertProducerAndRecordDeps(forOp, iterArg, initCoreType, diffUsers, info);
+                    if (isControlFlowOp(user)) {
+                        LOG_DEBUG("cannot process nested iterarg!");
+                        continue;
+                    }
+                    auto userCoreType = getCoreTypeWithIndex(user, 0);
+                    if (userCoreType == initCoreType) {
+                        initCoreTypeUsers.push_back(user);
+                    } else if (userCoreType == yieldCoreType) {
+                        yieldCoreTypeUsers.push_back(user);
+                    }
+                }
+
+                if (!initCoreTypeUsers.empty()) {
+                    LOG_DEBUG("exist initCoreTypeUsers\n");
+                    insertConsumerAndRecordDeps(forOp, yieldedValue, iterArgIndex, initCoreType, info);
+                    if (!yieldCoreTypeUsers.empty()) {
+                        insertProducerAndRecordDeps(forOp, iterArg, initCoreType, yieldCoreTypeUsers, info);
+                    }
+                } else if (!yieldCoreTypeUsers.empty()) {
+                    LOG_DEBUG("exist yieldCoreTypeUsers\n");
+                    recordInitValueDeps(forOp, initValue, yieldCoreType, info);
+                } else {
+                    LOG_DEBUG("no dependencies with: " << iterArg << "\n");
+                }
+            } else {
+                auto diffUsers = collectDiffCoreTypeUsers(iterArg, initCoreType);
+                if (!diffUsers.empty()) {
+                    insertProducerAndRecordDeps(forOp, iterArg, initCoreType, diffUsers, info);
+                }                
             }
         }
     }
@@ -753,6 +887,7 @@ std::pair<int, int> DataDependencyAnalysisPass::findCommonLevelBlockIds(DataDepe
                 break;
             }
             mlir::Operation *pPrevOp = pAncestors[pIndex - 1];
+            LOG_DEBUG("*pPrevOp" << *pPrevOp << "\n");
             auto pPrevIdOpt = CVPipeline::getOpBlockId(pPrevOp);
             auto cPrevIdOpt = CVPipeline::getOpBlockId(before);
             int pPrevId = pPrevIdOpt ? *pPrevIdOpt : -1;
@@ -787,6 +922,7 @@ void DataDependencyAnalysisPass::runOnOperation()
 
     // Step 2: Analyze iter_args dependencies
     processIterArgDependencies();
+    createBlockInfoMap(info);
 
     // Step 3: Analyze dependencies (populate v2c, c2v lists)
     analyzeExternalInputs(info);

@@ -63,6 +63,8 @@ struct DependencyInfo {
   // Optional Items for memDependencies
   mlir::Operation *predOp;
   mlir::Operation *nextOp;
+  // Optional Items for iterarg yield dependency
+  mlir::Operation *consumerYieldOp = nullptr;
 };
 
 class DataDependencyInfo {
@@ -159,6 +161,12 @@ private:
                                      llvm::StringRef initCoreType,
                                      llvm::SmallVector<mlir::Operation *> &diffUsers,
                                      DataDependencyInfo &info);
+    void insertConsumerAndRecordDeps(scf::ForOp forOp, mlir::Value yieldedValue,
+                                          int iterArgIndex, llvm::StringRef initCoreType,
+                                          DataDependencyInfo &info);
+    void recordInitValueDeps(scf::ForOp forOp, mlir::Value initValue,
+                             llvm::StringRef yieldCoreType,
+                             DataDependencyInfo &info);
 
   mlir::ModuleOp module;
 };
