@@ -237,7 +237,7 @@ void DataDependencyAnalysisPass::createBlockInfoMap(DataDependencyInfo &info)
 }
 
 void DataDependencyAnalysisPass::collectDepInfo(mlir::Value depvalue, DependencyType dependencyType,
-    llvm::SmallVector<DependencyInfo> &dependencies, int iniProdId, int iniConsId, DataDependencyInfo &info)
+    llvm::SmallVector<DependencyInfo> &dependencies, int iniProdId, int iniConsId, DataDependencyInfo &info, bool isAllTranspoesd)
 {
     DependencyInfo depInfo;
     depInfo.type = dependencyType;
@@ -255,6 +255,9 @@ void DataDependencyAnalysisPass::collectDepInfo(mlir::Value depvalue, Dependency
     depInfo.consumerBlockId = commonLevelIds.second;
     if (isValidScalarDependency(depvalue)) {
         depInfo.isScaler = true;
+    }
+    if (isAllTranspoesd) {
+        depInfo.isAllTranspoesd = true;
     }
     dependencies.push_back(depInfo);
 }
@@ -502,6 +505,28 @@ void DataDependencyAnalysisPass::analyzeExternalOutputs(DataDependencyInfo &info
 
             // Check who is using this output
             llvm::DenseSet<int> handledBlockIds;
+
+            // if c->v value will be transposed and then used by vector op, the value can be transposed within fixpipe
+            bool isAllTranspoesd = true;
+            for (mlir::Operation *user : output.getUsers()) {
+                if (!isa<linalg::TransposeOp>(user)) {
+                    isAllTranspoesd = false;
+                    continue;
+                }
+                for (mlir::Operation *transposeOpUser : user->getUsers()) {
+                    if (getSsbufferCoreType(transposeOpUser) != ssbufferCoreTypeVectorAttr) {
+                        isAllTranspoesd = false;
+                        continue;
+                    }
+                }
+            }
+            if (isAllTranspoesd) {
+                for (mlir::Operation *user : output.getUsers()) {
+                    auto transposedValue = user->getResults()[0];
+                    transposedValue.replaceAllUsesWith(opResult);
+                }
+            }
+
             for (mlir::Operation *user : output.getUsers()) {
                 int outputIndex = 0;
                 if (isControlFlowOp(user)) {
@@ -527,8 +552,8 @@ void DataDependencyAnalysisPass::analyzeExternalOutputs(DataDependencyInfo &info
                     int consumerId = *consumerIdOpt;
                     auto inserted = handledBlockIds.insert(consumerId).second;
                     if (inserted) {
-                      collectDepInfo(output, DependencyType::CubeToVector, c2vDependencies, blockInfo.blockId, consumerId,
-                          info);
+                        collectDepInfo(output, DependencyType::CubeToVector, c2vDependencies, blockInfo.blockId, consumerId,
+                            info, isAllTranspoesd);
                     }
                 }
                 // If user belongs to Cube block, this C->C dependency was handled
