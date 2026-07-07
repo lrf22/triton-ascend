@@ -51,6 +51,7 @@ inline constexpr llvm::StringLiteral kLoopCarriedL0C = "ssbuffer.loop_carried_l0
 inline constexpr llvm::StringLiteral kCrossDeps = "ssbuffer.crossDeps";
 inline constexpr llvm::StringLiteral kIntraDeps = "ssbuffer.intraDeps";
 inline constexpr llvm::StringLiteral kMemCrossDeps = "ssbuffer.memCrossDeps";
+inline constexpr llvm::StringLiteral kCrossCoreDeps = "ssbuffer.crossCoreDeps";
 inline constexpr llvm::StringLiteral kMayNotExec = "ssbuffer.may_not_exec";
 inline constexpr llvm::StringLiteral kClone = "ssbuffer.clone";
 static constexpr llvm::StringLiteral kInlinableQuantScaleAttr = "enable_fast_tf32_mul";
