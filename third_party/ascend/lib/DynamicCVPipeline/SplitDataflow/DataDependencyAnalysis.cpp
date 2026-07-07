@@ -56,6 +56,7 @@ using namespace mlir::CVPipeline;
 static constexpr const char *ssbufferCoreTypeCubeAttr = "CUBE";
 static constexpr const char *ssbufferCoreTypeVectorAttr = "VECTOR";
 static constexpr int ND_SHAPE_LENGTH = 2;
+static constexpr int SHAPE_1D_LENGTH = 1;
 
 // Helper: ssbuffer.core_type
 llvm::StringRef getSsbufferCoreType(Operation *op)
@@ -99,6 +100,22 @@ bool DataDependencyAnalysisPass::isCubeOrVectorOp(mlir::Operation *op)
     return false;
 }
 
+bool DataDependencyAnalysisPass::isValidBroadcastValueForDependency(mlir::Value value)
+{
+    auto tensorTy = dyn_cast<TensorType>(value.getType());
+    bool isUsedInMmadBias = false;
+    if (tensorTy && tensorTy.getRank() == SHAPE_1D_LENGTH) {
+        LOG_DEBUG("tensorTy && tensorTy.getRank() == SHAPE_1D_LENGTH");
+        for (mlir::Operation *user : value.getUsers()) {
+            if (user->hasAttr("ssbuffer.used_in_mmad_bias")) {
+                isUsedInMmadBias = true;
+                break;
+            }
+        }
+    }
+    return isUsedInMmadBias;
+}
+
 bool DataDependencyAnalysisPass::isValidShapeForDependency(mlir::Value value)
 {
     auto tensorTy = dyn_cast<TensorType>(value.getType());
@@ -128,6 +145,10 @@ bool DataDependencyAnalysisPass::isValidScalarDependency(mlir::Value value)
 bool DataDependencyAnalysisPass::isValidValueForDependency(mlir::Value value)
 {
     if (isValidScalarDependency(value)) {
+        return true;
+    }
+
+    if (isValidBroadcastValueForDependency(value)) {
         return true;
     }
 
@@ -256,6 +277,9 @@ void DataDependencyAnalysisPass::collectDepInfo(mlir::Value depvalue, Dependency
     if (isValidScalarDependency(depvalue)) {
         depInfo.isScaler = true;
     }
+    if (isValidBroadcastValueForDependency(depvalue)) {
+        depInfo.isUsedInMmadBias = true;
+    }
     if (isAllTranspoesd) {
         depInfo.isAllTranspoesd = true;
     }
@@ -342,7 +366,9 @@ void DataDependencyAnalysisPass::insertProducerAndRecordDeps(scf::ForOp forOp,
         auto [producerBlockId, consumerBlockId] = findCommonLevelBlockIds(info, newId, userBlockId);
         depInfo.producerBlockId = producerBlockId;
         depInfo.consumerBlockId = consumerBlockId;
-
+        if (isValidBroadcastValueForDependency(iterArg)) {
+            depInfo.isUsedInMmadBias = true;
+        }
         if (depType == DependencyType::VectorToCube) {
             v2cDependencies.push_back(depInfo);
         } else {
@@ -408,8 +434,9 @@ void DataDependencyAnalysisPass::processIterArgDependencies()
             LOG_DEBUG("initValue" << initValue << "\n");
             LOG_DEBUG("yieldedValue" << yieldedValue << "\n");
 
-            if (!isValidShapeForDependency(initValue) || !isValidShapeForDependency(yieldedValue)) {
-                LOG_DEBUG("iterarg: "<< iterArg <<"is not valid tensor for dependency!");
+            if (!isValidBroadcastValueForDependency(iterArg)
+                && (!isValidShapeForDependency(initValue) || !isValidShapeForDependency(yieldedValue))) {
+                LOG_DEBUG("iterarg: "<< iterArg <<" is not valid tensor for dependency!");
                 continue;
             }
 
