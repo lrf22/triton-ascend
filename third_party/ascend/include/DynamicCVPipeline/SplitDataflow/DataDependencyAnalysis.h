@@ -52,6 +52,7 @@ struct DependencyInfo {
   DependencyType type;
   mlir::Value value;
   bool isScaler = false;
+  bool isUsedInMmadBias = false;
   int producerBlockId;
   int consumerBlockId;
   int iniProducerBlockId;
@@ -153,6 +154,7 @@ private:
     bool isValidShapeForDependency(mlir::Value value);
     bool isValidValueForDependency(mlir::Value value);
     bool isValidScalarDependency(mlir::Value value);
+    bool isValidBroadcastValueForDependency(mlir::Value value);
     bool isOuterOpArg(mlir::Value value);
     void processIterArgDependencies();
     void analyzeV2CMatmulABType(DataDependencyInfo &info);

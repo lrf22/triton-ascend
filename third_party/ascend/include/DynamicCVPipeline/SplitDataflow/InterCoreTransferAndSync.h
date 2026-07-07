@@ -154,7 +154,7 @@ private:
   mlir::Operation *getConsumerWaitPoint(int transferIndex);
   mlir::Operation *insertVectorToCubeTransfer(mlir::OpBuilder &builder, mlir::Value srcValue,
     mlir::Value normalizedValue, mlir::Operation *vectorEndOp, mlir::Operation *cubeStartOp, mlir::Location loc,
-    int transferIndex, int iniConsumerId, bool isScaler, mlir::Operation **consumedDataOp = nullptr);
+    int transferIndex, int iniConsumerId, bool isScaler, bool isUsedInMmadBias, mlir::Operation **consumedDataOp = nullptr);
   mlir::Operation *insertCubeToVectorTransfer(mlir::OpBuilder &builder, mlir::Value srcValue,
     mlir::Operation *cubeEndOp, mlir::Operation *vectorStartOp, mlir::Location loc, int transferIndex,
     int iniConsumerId, bool isAllTranspoesd, mlir::Operation **consumedDataOp = nullptr);
