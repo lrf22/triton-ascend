@@ -94,13 +94,10 @@ private:
                       FlagIdReuseManager &flagIdReuseManager);
   mlir::LogicalResult
   handleVectorToCube(mlir::OpBuilder &builder, DependencyInfo &dep,
-                     llvm::DenseMap<mlir::Value, mlir::Value> vecvalueMapping,
-                     llvm::DenseMap<mlir::Value, mlir::Value> cubeValueMapping,
                      FlagIdManager &flagManager,
                      FlagIdReuseManager &flagIdReuseManager);
   mlir::LogicalResult
   handleCubeToVector(mlir::OpBuilder &builder, DependencyInfo &dep,
-                     llvm::DenseMap<mlir::Value, mlir::Value> cubeValueMapping,
                      FlagIdManager &flagManager,
                      FlagIdReuseManager &flagIdReuseManager);
   mlir::LogicalResult handleMemoryDependency(
@@ -115,41 +112,15 @@ private:
                          mlir::Operation *currConsStart,
                          llvm::SmallVector<DependencyInfo> &memDependencies);
 
-  SmallVector<int64_t> computeExpectedShape(mlir::Value depValue,
-                                            bool isMatmulA, bool isMatmulB,
-                                            bool isOnlyDepInMatmul);
-  std::pair<bool, bool> isExpectedShape(Value value,
-                                        SmallVector<int64_t> &expectedShape,
-                                        bool isMatmulA, bool isMatmulB,
-                                        bool isOnlyDepInMatmul);
-  bool matmulCIsEmpty(mlir::Value acc);
-  void padMatmulInnerDim(OpBuilder &builder, Operation *matmulOp, Location loc,
-                         int matmulIndex, int matmulOpBlockId);
-  void extractMatmulResult(
-      OpBuilder &builder, Operation *matmulOp, Location loc,
-      int matmulOpBlockId,
-      llvm::DenseMap<mlir::Value, mlir::Value> &cubeValueMapping,
-      bool isOnlyDepInMatmul);
+  SmallVector<int64_t> computeExpectedShape(mlir::Value depValue);
+  bool isExpectedShape(Value value,
+                       SmallVector<int64_t> &expectedShape);
   mlir::Value normalizeIfNeeded(mlir::OpBuilder &builder, DependencyInfo &dep,
                                 mlir::Location loc, mlir::Value origValue,
                                 llvm::SmallVector<int64_t> expectedShape,
-                                int originBlockId, bool matmulpadding,
-                                bool isOnlyDepInMatmul);
+                                int originBlockId);
   void Nd2NzNormalize(mlir::OpBuilder &builder, DependencyInfo &dep,
                       mlir::Location loc);
-  void rewriteMatmulWithNewShape(mlir::OpBuilder &builder,
-                                 mlir::Operation *matmulOp, mlir::Location loc,
-                                 bool isMatmulA, bool isMatmulB,
-                                 bool matmulpadding, bool isOnlyDepInMatmul);
-  void rewriteTransposeWithNewShape(mlir::OpBuilder &builder,
-                                    mlir::Operation *transposeOp,
-                                    mlir::Location loc);
-  llvm::DenseMap<mlir::Value, mlir::Value> getVecValueMapping() {
-    return vecValueMapping;
-  }
-  llvm::DenseMap<mlir::Value, mlir::Value> getCubeValueMapping() {
-    return cubeValueMapping;
-  }
 
   mlir::Operation *annotateTightlyCoupledBuffer(mlir::OpBuilder &builder,
                                                 mlir::Operation *allocOp,
