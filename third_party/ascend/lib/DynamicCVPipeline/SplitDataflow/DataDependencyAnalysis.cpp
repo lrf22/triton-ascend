@@ -539,7 +539,16 @@ void DataDependencyAnalysisPass::analyzeExternalOutputs(DataDependencyInfo &info
             for (mlir::Operation *user : output.getUsers()) {
                 if (!isa<linalg::TransposeOp>(user)) {
                     isAllTranspoesd = false;
-                    continue;
+                    break;
+                }
+                for (mlir::Operation *transposeOpUser : user->getUsers()) {
+                  if (getSsbufferCoreType(transposeOpUser) != ssbufferCoreTypeVectorAttr) {
+                    isAllTranspoesd = false;
+                    break;
+                  }
+                }
+                if (!isAllTranspoesd) {
+                    break;
                 }
                 // check if the two dimensions of the transposed value are equal)
                 if (user->getNumResults() == 0) {
@@ -558,12 +567,6 @@ void DataDependencyAnalysisPass::analyzeExternalOutputs(DataDependencyInfo &info
                     CVPipeline::setFallbackAttr(module);
                     signalPassFailure();
                     break;
-                }
-                for (mlir::Operation *transposeOpUser : user->getUsers()) {
-                    if (getSsbufferCoreType(transposeOpUser) != ssbufferCoreTypeVectorAttr) {
-                        isAllTranspoesd = false;
-                        continue;
-                    }
                 }
             }
             if (isAllTranspoesd) {
