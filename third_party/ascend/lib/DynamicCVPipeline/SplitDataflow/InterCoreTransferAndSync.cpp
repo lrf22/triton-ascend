@@ -1025,9 +1025,9 @@ void InterCoreTransferAndSyncPass::insertInterCoreSync(
 }
 
 void InterCoreTransferAndSyncPass::insertMemDepSync(
-    OpBuilder &builder, Operation *producerOp, Operation *consumerOp,
-    Operation *consumerEndOp, int flag, Location loc, bool isCubeToVector,
-    FlagIdReuseManager &flagIdReuseManager) {
+    OpBuilder &builder, Operation *producerStartOp, Operation *producerEndOp,
+    Operation *consumerStartOp, Operation *consumerEndOp, int flag,
+    Location loc, bool isCubeToVector, FlagIdReuseManager &flagIdReuseManager) {
   LOG_DEBUG("Inserting Memdep sync: "
             << (isCubeToVector ? "CUBE->VECTOR" : "VECTOR->CUBE")
             << ", flag = " << flag << "\n");
@@ -1051,16 +1051,16 @@ void InterCoreTransferAndSyncPass::insertMemDepSync(
   auto dstPipeAttr = PipeAttr::get(builder.getContext(), dstPipe);
   auto flagId = builder.getIntegerAttr(builder.getI64Type(), flag);
 
-  builder.setInsertionPointAfter(producerOp);
+  builder.setInsertionPointAfter(producerEndOp);
   auto setOp = builder.create<SyncBlockSetOp>(loc, srcCoreAttr, srcPipeAttr,
                                               dstPipeAttr, flagId);
 
-  builder.setInsertionPoint(consumerOp);
+  builder.setInsertionPoint(consumerStartOp);
   auto waitOp = builder.create<SyncBlockWaitOp>(loc, dstCoreAttr, srcPipeAttr,
                                                 dstPipeAttr, flagId);
 
-  auto prodBlockIdOpt = CVPipeline::getOpBlockId(producerOp);
-  auto consBlockIdOpt = CVPipeline::getOpBlockId(consumerOp);
+  auto prodBlockIdOpt = CVPipeline::getOpBlockId(producerEndOp);
+  auto consBlockIdOpt = CVPipeline::getOpBlockId(consumerStartOp);
   if (!prodBlockIdOpt || !consBlockIdOpt) {
     LOG_DEBUG("Failed to get block IDs for producer or consumer operation.\n");
     CVPipeline::setFallbackAttr(module, CVPipeline::ERRCODE_FAILED);
@@ -1076,8 +1076,9 @@ void InterCoreTransferAndSyncPass::insertMemDepSync(
   attachAnalyzeFlagIdTag(waitOp);
   flagIdReuseManager.insertRelationBetweenSetAndWait(setOp, waitOp);
 
-  if (Operation *mainLoopOp = findMainLoopforTransfer(producerOp, consumerOp)) {
-    builder.setInsertionPoint(producerOp);
+  if (Operation *mainLoopOp =
+          findMainLoopforTransfer(producerEndOp, consumerStartOp)) {
+    builder.setInsertionPoint(producerStartOp);
     auto waitOpForWrite = builder.create<SyncBlockWaitOp>(
         loc, srcCoreAttr, dstPipeAttr, srcPipeAttr, flagId);
     attachCommonTags(waitOpForWrite, *prodBlockIdOpt, prodCoreType);
@@ -1687,9 +1688,13 @@ LogicalResult InterCoreTransferAndSyncPass::handleMemoryDependency(
 
   // Get location info
   Location loc = prodEnd->getLoc();
+  if (dep.iniProducerBlockId == dep.producerBlockId &&
+      dep.iniConsumerBlockId == dep.consumerBlockId) {
+    prodEnd = dep.predOp;
+    prodStart = dep.predOp;
+  }
 
-  // Insert Memdep sync
-  insertMemDepSync(builder, dep.predOp, consStart, consEnd, flagId, loc,
+  insertMemDepSync(builder, prodStart, prodEnd, consStart, consEnd, flagId, loc,
                    isCubeToVector, flagIdReuseManager);
 
   transferIndex++;
