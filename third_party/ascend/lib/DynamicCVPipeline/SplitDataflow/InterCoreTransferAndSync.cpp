@@ -1084,23 +1084,6 @@ void InterCoreTransferAndSyncPass::insertInterCoreSync(
   return;
 }
 
-bool hasMemDepSyncWhitelistKernel(ModuleOp module) {
-  std::vector<std::string> whitelist{
-      "_hstu_attn_fwd",
-      "parallel_path_fwd_kernel",
-  };
-
-  // Check if any func name matches the whitelist
-  bool hasWhitelistedKernel = false;
-  for (auto func : module.getOps<func::FuncOp>()) {
-    if (llvm::is_contained(whitelist, func.getName().str())) {
-      hasWhitelistedKernel = true;
-      break;
-    }
-  }
-  return hasWhitelistedKernel;
-}
-
 void InterCoreTransferAndSyncPass::insertMemDepSync(
     OpBuilder &builder, DependencyInfo &dep, int flag, Location loc,
     bool isCubeToVector, FlagIdReuseManager &flagIdReuseManager) {
@@ -1150,42 +1133,42 @@ void InterCoreTransferAndSyncPass::insertMemDepSync(
   attachAnalyzeFlagIdTag(setOp);
   attachAnalyzeFlagIdTag(waitOp);
   flagIdReuseManager.insertRelationBetweenSetAndWait(setOp, waitOp);
-  if (hasMemDepSyncWhitelistKernel(module)) {
-    if (Operation *mainLoopOp =
-            findMainLoopforTransfer(dep.producerEnd, dep.consumerStart)) {
-      builder.setInsertionPoint(dep.producerStart);
-      auto waitOpForWrite = builder.create<SyncBlockWaitOp>(
-          loc, srcCoreAttr, dstPipeAttr, srcPipeAttr, flagId);
-      attachCommonTags(waitOpForWrite, *prodBlockIdOpt, prodCoreType);
 
-      builder.setInsertionPointAfter(dep.consumerEnd);
-      auto setOpForWrite = builder.create<SyncBlockSetOp>(
-          loc, dstCoreAttr, dstPipeAttr, srcPipeAttr, flagId);
-      attachCommonTags(setOpForWrite, *consBlockIdOpt, consCoreType);
+  if (Operation *mainLoopOp =
+        findMainLoopforTransfer(dep.producerEnd, dep.consumerStart)) {
+    builder.setInsertionPoint(dep.producerStart);
+    auto waitOpForWrite = builder.create<SyncBlockWaitOp>(
+        loc, srcCoreAttr, dstPipeAttr, srcPipeAttr, flagId);
+    attachCommonTags(waitOpForWrite, *prodBlockIdOpt, prodCoreType);
 
-      builder.setInsertionPoint(mainLoopOp);
-      auto setOpForStart = builder.create<SyncBlockSetOp>(
-          loc, dstCoreAttr, dstPipeAttr, srcPipeAttr, flagId);
-      builder.setInsertionPointAfter(mainLoopOp);
-      auto waitOpForEnd = builder.create<SyncBlockWaitOp>(
-          loc, srcCoreAttr, dstPipeAttr, srcPipeAttr, flagId);
+    builder.setInsertionPointAfter(dep.consumerEnd);
+    auto setOpForWrite = builder.create<SyncBlockSetOp>(
+        loc, dstCoreAttr, dstPipeAttr, srcPipeAttr, flagId);
+    attachCommonTags(setOpForWrite, *consBlockIdOpt, consCoreType);
 
-      // The loop definitely have a block_id and it will not take the value of
-      // -1.
-      int startEndBlockId = CVPipeline::getOpBlockId(mainLoopOp).value_or(0);
-      attachCommonTags(setOpForStart, startEndBlockId, consCoreType);
-      attachCommonTags(waitOpForEnd, startEndBlockId, prodCoreType);
+    builder.setInsertionPoint(mainLoopOp);
+    auto setOpForStart = builder.create<SyncBlockSetOp>(
+        loc, dstCoreAttr, dstPipeAttr, srcPipeAttr, flagId);
+    builder.setInsertionPointAfter(mainLoopOp);
+    auto waitOpForEnd = builder.create<SyncBlockWaitOp>(
+        loc, srcCoreAttr, dstPipeAttr, srcPipeAttr, flagId);
 
-      attachAnalyzeFlagIdTag(waitOpForWrite);
-      attachAnalyzeFlagIdTag(setOpForWrite);
-      attachAnalyzeFlagIdTag(setOpForStart);
-      attachAnalyzeFlagIdTag(waitOpForEnd);
-      flagIdReuseManager.insertRelationBetweenSetAndWait(setOpForWrite,
-                                                         waitOpForWrite);
-      flagIdReuseManager.insertRelationBetweenSetAndWait(setOpForStart,
-                                                         waitOpForEnd);
-    }
+    // The loop definitely have a block_id and it will not take the value of
+    // -1.
+    int startEndBlockId = CVPipeline::getOpBlockId(mainLoopOp).value_or(0);
+    attachCommonTags(setOpForStart, startEndBlockId, consCoreType);
+    attachCommonTags(waitOpForEnd, startEndBlockId, prodCoreType);
+
+    attachAnalyzeFlagIdTag(waitOpForWrite);
+    attachAnalyzeFlagIdTag(setOpForWrite);
+    attachAnalyzeFlagIdTag(setOpForStart);
+    attachAnalyzeFlagIdTag(waitOpForEnd);
+    flagIdReuseManager.insertRelationBetweenSetAndWait(setOpForWrite,
+                                                        waitOpForWrite);
+    flagIdReuseManager.insertRelationBetweenSetAndWait(setOpForStart,
+                                                        waitOpForEnd);
   }
+
   LOG_DEBUG("[PIPE_MTE2 setOp]: " << *setOp << "\n");
   LOG_DEBUG("[PIPE_MTE2 waitOp]: " << *waitOp << "\n");
 }
@@ -1793,9 +1776,7 @@ LogicalResult InterCoreTransferAndSyncPass::handleMemoryDependency(
 
   // Get location info
   Location loc = dep.producerEnd->getLoc();
-  if (dep.iniProducerBlockId == dep.producerBlockId &&
-      dep.iniConsumerBlockId == dep.consumerBlockId &&
-      hasMemDepSyncWhitelistKernel(module)) {
+  if (dep.predOp->getBlock() == dep.nextOp->getBlock()) {
     dep.producerEnd = dep.predOp;
     dep.producerStart = dep.predOp;
   }
