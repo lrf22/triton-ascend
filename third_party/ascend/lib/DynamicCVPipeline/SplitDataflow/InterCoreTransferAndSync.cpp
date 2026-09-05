@@ -124,9 +124,17 @@ static void attachMemCrossDeps(Operation *op, int tid, int seqId,
 
 static void attachCrossCoreDeps(Operation *op, int tid, int seqId,
                                 OpBuilder &builder) {
-  op->setAttr(CVPipeline::kCrossCoreDeps,
-              builder.getArrayAttr({builder.getI32IntegerAttr(tid),
-                                    builder.getI32IntegerAttr(seqId)}));
+
+  if (auto existingDeps = op->getAttrOfType<ArrayAttr>(CVPipeline::kCrossCoreDeps)) {
+    SmallVector<Attribute> merged(existingDeps.getValue());
+    merged.push_back(builder.getI32IntegerAttr(tid));
+    merged.push_back(builder.getI32IntegerAttr(seqId));
+    op->setAttr(CVPipeline::kCrossCoreDeps, builder.getArrayAttr(merged));
+  } else {
+    op->setAttr(CVPipeline::kCrossCoreDeps,
+                builder.getArrayAttr({builder.getI32IntegerAttr(tid),
+                                      builder.getI32IntegerAttr(seqId)}));
+  }
 }
 
 static void attachAnalyzeFlagIdTag(Operation *op) {
@@ -275,61 +283,6 @@ InterCoreTransferAndSyncPass::getSubBlockEnd(mlir::Operation *defOp) {
     }
   }
   return subBlockEnd;
-}
-
-bool InterCoreTransferAndSyncPass::isOuterLayerDependency(
-    size_t depIndex, DependencyInfo &dep,
-    llvm::SmallVector<DependencyInfo> &memDependencies) {
-  Operation *currProdEnd = dep.producerEnd;
-  Operation *currConsStart = dep.consumerStart;
-  if (!currProdEnd || !currConsStart) {
-    return false;
-  }
-  mlir::Block *currBlock = currProdEnd->getBlock();
-  if (currBlock != currConsStart->getBlock()) {
-    return false;
-  }
-  for (size_t i = 0; i < memDependencies.size(); ++i) {
-    if (i == depIndex) {
-      continue;
-    }
-    auto &otherDep = memDependencies[i];
-
-    if (otherDep.type != memDependencies[depIndex].type) {
-      continue;
-    }
-
-    auto [otherProdStart, otherProdEnd] =
-        getBlockStartEnd(otherDep.producerBlockId, module);
-    auto [otherConsStart, otherConsEnd] =
-        getBlockStartEnd(otherDep.consumerBlockId, module);
-
-    if (!otherProdEnd || !otherConsStart) {
-      continue;
-    }
-
-    if (otherProdEnd->getBlock() != currBlock ||
-        otherConsStart->getBlock() != currBlock) {
-      continue;
-    }
-
-    // otherProdEnd is before currProdEnd
-    // AND currConsStart is before otherConsStart
-    bool isOtherInsideCurrent = !otherProdEnd->isBeforeInBlock(currProdEnd) &&
-                                !currConsStart->isBeforeInBlock(otherConsStart);
-
-    if (otherProdEnd == currProdEnd && otherConsStart == currConsStart) {
-      if (i < depIndex) {
-        // if otherDep has smaller index, current dep is outer layer and can be
-        // skipped
-        return true;
-      }
-    } else if (isOtherInsideCurrent) {
-      return true;
-    }
-  }
-
-  return false;
 }
 
 // Nd2NzNormalizer
@@ -1768,13 +1721,6 @@ LogicalResult InterCoreTransferAndSyncPass::handleMemoryDependency(
       !dep.consumerEnd) {
     LOG_DEBUG("[ERROR] Failed to get block start/end operations.\n");
     return failure();
-  }
-
-  if (isOuterLayerDependency(depIndex, dep, memDependencies)) {
-    LOG_DEBUG("[MEMDEP] Skipping outer layer dependency: block "
-              << dep.producerBlockId << " -> block " << dep.consumerBlockId
-              << "\n");
-    return success();
   }
 
   attachMemCrossDeps(dep.predOp, transferIndex, CVPipeline::crossCoreProducerId,
