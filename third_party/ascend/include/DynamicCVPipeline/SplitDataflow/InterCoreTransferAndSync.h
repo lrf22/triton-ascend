@@ -129,9 +129,6 @@ private:
   getBlockStartEnd(int blockId, mlir::ModuleOp module);
   std::pair<mlir::Operation *, mlir::Operation *>
   getSubBlockStartEnd(mlir::Operation *defOp);
-  bool
-  isOuterLayerDependency(size_t depIndex, DependencyInfo &dep,
-                         llvm::SmallVector<DependencyInfo> &memDependencies);
 
   SmallVector<int64_t> computeExpectedShape(mlir::Value depValue);
   bool isExpectedShape(Value value, SmallVector<int64_t> &expectedShape);
