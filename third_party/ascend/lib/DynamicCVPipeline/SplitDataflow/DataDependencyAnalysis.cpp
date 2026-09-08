@@ -653,11 +653,22 @@ void DataDependencyAnalysisPass::processIterArgDependencies() {
           initDefOp, initDefReuslt ? initDefReuslt.getResultNumber() : 0);
 
       LOG_DEBUG("[initDefOp]: " << *initDefOp << "\n");
-      if (initCoreType == yieldCoreType || isCubeOrVectorOp(initDefOp)) {
+      if (initCoreType == yieldCoreType && !isCubeOrVectorOp(initDefOp)) {
         auto diffUsers = collectDiffCoreTypeUsers(iterArg, yieldCoreType);
         if (!diffUsers.empty()) {
           insertProducerAndRecordDeps(loopOp, iterArg, yieldCoreType, diffUsers,
                                       info);
+        }
+      } else if (isCubeOrVectorOp(initDefOp)) {
+        if (yieldCoreType == CVPipeline::kCoreTypeVector) {
+          auto diffUsers = collectDiffCoreTypeUsers(iterArg, yieldCoreType);
+          if (!diffUsers.empty()) {
+            insertProducerAndRecordDeps(loopOp, iterArg, yieldCoreType, diffUsers,
+                                        info);
+          }
+        } else if (yieldCoreType == CVPipeline::kCoreTypeCube) {
+          insertConsumerAndRecordDeps(loopOp, yieldedValue, iterArgIndex,
+                                      initCoreType, info);
         }
       } else {
         llvm::SmallVector<mlir::Operation *> initCoreTypeUsers;
