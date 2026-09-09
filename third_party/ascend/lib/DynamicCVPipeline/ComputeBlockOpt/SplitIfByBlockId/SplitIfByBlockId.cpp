@@ -1475,7 +1475,8 @@ static void postProcess(scf::IfOp ifOp, scf::IfOp sourceIfOp, int blockId,
     setBlockId(elseYield);
   }
 
-  ifOp->setAttr(kSplittedIf, builder.getI32IntegerAttr(splittedIfTag));
+  ifOp->setAttr(CVPipeline::kSplittedIf,
+                builder.getI32IntegerAttr(splittedIfTag));
 }
 
 /// Materialize a split-if chain with per-group signatures.
@@ -1786,7 +1787,7 @@ void SplitIfByBlockIdPass::runOnOperation() {
   auto &aa = getAnalysis<AliasAnalysis>();
   CVPipeline::MemoryDependenceGraph memGraph{module, aa};
   module->walk([&](scf::IfOp ifOp) {
-    if (ifOp->hasAttr(kSplittedIf)) {
+    if (ifOp->hasAttr(CVPipeline::kSplittedIf)) {
       rearrangeIfOp(ifOp, memGraph);
     }
   });
