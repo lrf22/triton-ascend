@@ -1438,7 +1438,10 @@ static scf::YieldOp safeGetTerminator(Block *block) {
   return llvm::dyn_cast_if_present<scf::YieldOp>(block->getTerminator());
 }
 
-static int splittedIfCounter = 0;
+struct SplittedIfTagGenerator {
+  int counter = 0;
+  int next() { return counter++; }
+};
 
 static void postProcess(scf::IfOp ifOp, scf::IfOp sourceIfOp, int blockId,
                         int splittedIfTag) {
@@ -1479,14 +1482,15 @@ static void postProcess(scf::IfOp ifOp, scf::IfOp sourceIfOp, int blockId,
 /// Non-last groups get their own result types; last group carries original
 /// results.
 static llvm::LogicalResult
-materializeCandidate(CandidateIf &c, CVPipeline::ComputeBlockIdManager &bm) {
+materializeCandidate(CandidateIf &c, CVPipeline::ComputeBlockIdManager &bm,
+                     SplittedIfTagGenerator &tagGen) {
   OpBuilder builder(c.ifOp);
   auto originalIf = c.ifOp;
   auto loc = originalIf.getLoc();
   Value condition = originalIf.getCondition();
   auto &ya = c.yieldAug;
 
-  int splittedIfTag = splittedIfCounter++;
+  int splittedIfTag = tagGen.next();
 
   LDBG("[Part3] enter materializeCandidate hasYield=" << c.hasYield);
 
@@ -1733,7 +1737,7 @@ public:
 } // namespace
 
 void SplitIfByBlockIdPass::runOnOperation() {
-  splittedIfCounter = 0;
+  SplittedIfTagGenerator tagGen;
   ModuleOp module = getOperation();
   if (hasFallbackAttr(module)) {
     return;
@@ -1761,7 +1765,7 @@ void SplitIfByBlockIdPass::runOnOperation() {
       preprocessScalarDependencies(candidate);
       LLVM_DEBUG(dumpCandidate(candidate));
       analyzeDependencies(candidate);
-      if (materializeCandidate(candidate, bm).failed()) {
+      if (materializeCandidate(candidate, bm, tagGen).failed()) {
         return WalkResult::interrupt();
       }
 

@@ -76,3 +76,42 @@ func.func @split_else_cvc_fill_placeholder(%a: tensor<2x2xf32>, %b: tensor<2x2xf
   }
   return
 }
+
+// -----
+
+// CUBE group's matmul outs is an OpResult from fill+empty inside the if,
+// so the CUBE else-block creates a filled placeholder instead of reusing
+// the outs root.
+// C-V-C groups: CUBE(95,matmul) -> VECTOR(96) -> CUBE(97)
+// CHECK-LABEL: func.func @split_cube_matmul_outs_op_result
+// CUBE 95 then: fill+empty+matmul; else: fill placeholder (OpResult path)
+// CHECK: scf.if
+// CHECK: linalg.matmul {{.*}}ssbuffer.block_id = 95
+// CHECK: scf.yield {ssbuffer.block_id = 95 : i32}
+// CHECK: } else {
+// CHECK: tensor.empty() {ssbuffer.block_id = 95 : i32} : tensor<2x2xf32>
+// CHECK: arith.constant {{.*}}ssbuffer.block_id = 95 : i32} 0.000000e+00 : f32
+// CHECK: linalg.fill {ssbuffer.block_id = 95 : i32}
+// CHECK: scf.yield {ssbuffer.block_id = 95 : i32}
+// VECTOR 96
+// CHECK: scf.if
+// CHECK: arith.addf {{.*}}ssbuffer.block_id = 96
+// CUBE 97: last group, void if (no else, no yield)
+// CHECK: scf.if
+// CHECK: linalg.matmul {{.*}}ssbuffer.block_id = 97
+func.func @split_cube_matmul_outs_op_result(%a: tensor<2x2xf32>, %b: tensor<2x2xf32>, %c: tensor<2x2xf32>, %d: tensor<2x2xf32>, %cond: i1) {
+  %c0 = arith.constant 0 : index
+  %c1 = arith.constant 1 : index
+  scf.for %iv = %c0 to %c1 step %c1 {
+    %cube = arith.addf %c, %d {ssbuffer.block_id = 0 : i32, ssbuffer.core_type = "CUBE"} : tensor<2x2xf32>
+    scf.if %cond {
+      %empty = tensor.empty() : tensor<2x2xf32>
+      %z = arith.constant 0.000000e+00 : f32
+      %filled = linalg.fill ins(%z : f32) outs(%empty : tensor<2x2xf32>) -> tensor<2x2xf32>
+      %m = linalg.matmul ins(%a, %b : tensor<2x2xf32>, tensor<2x2xf32>) outs(%filled : tensor<2x2xf32>) {ssbuffer.block_id = 95 : i32, ssbuffer.core_type = "CUBE"} -> tensor<2x2xf32>
+      %v = arith.addf %m, %m {ssbuffer.block_id = 96 : i32, ssbuffer.core_type = "VECTOR"} : tensor<2x2xf32>
+      %m2 = linalg.matmul ins(%a, %v : tensor<2x2xf32>, tensor<2x2xf32>) outs(%a : tensor<2x2xf32>) {ssbuffer.block_id = 97 : i32, ssbuffer.core_type = "CUBE"} -> tensor<2x2xf32>
+    }
+  }
+  return
+}
