@@ -919,10 +919,23 @@ static Value getRootTensor(Value v) {
   return v;
 }
 
-static llvm::FailureOr<Value>
-createMatmulPlaceHolderValue(OpBuilder &builder, scf::IfOp ifOp,
-                             linalg::MatmulOp matmulOp,
-                             RankedTensorType tensorType, Location loc) {
+static Value createZeroFilledTensor(OpBuilder &builder, Location loc,
+                                    RankedTensorType tensorType, int blockId) {
+  auto emptyOp = builder.create<tensor::EmptyOp>(loc, tensorType.getShape(),
+                                                 tensorType.getElementType());
+  auto zeroOp = builder.create<arith::ConstantOp>(
+      loc, builder.getZeroAttr(tensorType.getElementType()));
+  emptyOp->setAttr(CVPipeline::kBlockId, builder.getI32IntegerAttr(blockId));
+  zeroOp->setAttr(CVPipeline::kBlockId, builder.getI32IntegerAttr(blockId));
+  auto fillOp = builder.create<linalg::FillOp>(
+      loc, ValueRange{zeroOp.getResult()}, ValueRange{emptyOp.getResult()});
+  fillOp->setAttr(CVPipeline::kBlockId, builder.getI32IntegerAttr(blockId));
+  return fillOp->getResult(0);
+}
+
+static llvm::FailureOr<Value> createMatmulPlaceHolderValue(
+    OpBuilder &builder, scf::IfOp ifOp, linalg::MatmulOp matmulOp,
+    RankedTensorType tensorType, Location loc, int blockId) {
   auto bias = matmulOp.getDpsInitOperand(0)->get();
   auto block = ifOp->getBlock();
   return llvm::TypeSwitch<Value, llvm::FailureOr<Value>>(bias)
@@ -944,9 +957,7 @@ createMatmulPlaceHolderValue(OpBuilder &builder, scf::IfOp ifOp,
         if (!sourceEmpty)
           return llvm::failure();
 
-        auto emptyOp = builder.create<tensor::EmptyOp>(
-            loc, tensorType.getShape(), tensorType.getElementType());
-        return emptyOp.getResult();
+        return createZeroFilledTensor(builder, loc, tensorType, blockId);
       })
       .Default([](auto) { return llvm::failure(); });
 }
@@ -967,8 +978,8 @@ createPlaceholderValue(int blockId, OpBuilder &builder, Location loc, Type type,
       if (matmulOpt.has_value()) {
         auto matmulOp = llvm::dyn_cast<linalg::MatmulOp>(matmulOpt.value());
         if (matmulOp) {
-          auto resultRes = createMatmulPlaceHolderValue(builder, ifOp, matmulOp,
-                                                        tensorType, loc);
+          auto resultRes = createMatmulPlaceHolderValue(
+              builder, ifOp, matmulOp, tensorType, loc, blockId);
           if (llvm::failed(resultRes)) {
             return llvm::failure();
           }
@@ -995,8 +1006,9 @@ createPlaceholderValue(int blockId, OpBuilder &builder, Location loc, Type type,
       }
     }
     if (!usedTrace) {
-      result = builder.create<tensor::EmptyOp>(loc, tensorType.getShape(),
-                                               tensorType.getElementType());
+      // bare tensor.empty has no consumer after bufferization;
+      // wrap as linalg.fill DPS init for proper lifetime.
+      result = createZeroFilledTensor(builder, loc, tensorType, blockId);
     }
   } else if (auto floatType = dyn_cast<FloatType>(type)) {
     result = builder.create<arith::ConstantOp>(
@@ -1426,9 +1438,10 @@ static scf::YieldOp safeGetTerminator(Block *block) {
   return llvm::dyn_cast_if_present<scf::YieldOp>(block->getTerminator());
 }
 
-constexpr llvm::StringRef kSplittedIf = "ssbuffer.splitted_if";
+static int splittedIfCounter = 0;
 
-static void postProcess(scf::IfOp ifOp, scf::IfOp sourceIfOp, int blockId) {
+static void postProcess(scf::IfOp ifOp, scf::IfOp sourceIfOp, int blockId,
+                        int splittedIfTag) {
   OpBuilder builder{ifOp};
 
   ifOp->setAttrs(sourceIfOp->getAttrs());
@@ -1459,7 +1472,7 @@ static void postProcess(scf::IfOp ifOp, scf::IfOp sourceIfOp, int blockId) {
     setBlockId(elseYield);
   }
 
-  ifOp->setAttr(kSplittedIf, builder.getUnitAttr());
+  ifOp->setAttr(kSplittedIf, builder.getI32IntegerAttr(splittedIfTag));
 }
 
 /// Materialize a split-if chain with per-group signatures.
@@ -1472,6 +1485,8 @@ materializeCandidate(CandidateIf &c, CVPipeline::ComputeBlockIdManager &bm) {
   auto loc = originalIf.getLoc();
   Value condition = originalIf.getCondition();
   auto &ya = c.yieldAug;
+
+  int splittedIfTag = splittedIfCounter++;
 
   LDBG("[Part3] enter materializeCandidate hasYield=" << c.hasYield);
 
@@ -1565,7 +1580,7 @@ materializeCandidate(CandidateIf &c, CVPipeline::ComputeBlockIdManager &bm) {
       updateCrossValueReplacementGroup(output, splittedIf, thenBlock,
                                        crossValueReplacement);
     }
-    postProcess(splittedIf, originalIf, groups[gi].blockId);
+    postProcess(splittedIf, originalIf, groups[gi].blockId, splittedIfTag);
   }
 
   // Phase 2: Materialize the last group.
@@ -1650,7 +1665,7 @@ materializeCandidate(CandidateIf &c, CVPipeline::ComputeBlockIdManager &bm) {
       builder.create<scf::YieldOp>(loc);
     }
   }
-  postProcess(lastIf, originalIf, groups[lastGi].blockId);
+  postProcess(lastIf, originalIf, groups[lastGi].blockId, splittedIfTag);
 
   originalIf->erase();
 
@@ -1718,6 +1733,7 @@ public:
 } // namespace
 
 void SplitIfByBlockIdPass::runOnOperation() {
+  splittedIfCounter = 0;
   ModuleOp module = getOperation();
   if (hasFallbackAttr(module)) {
     return;
@@ -1768,7 +1784,6 @@ void SplitIfByBlockIdPass::runOnOperation() {
   module->walk([&](scf::IfOp ifOp) {
     if (ifOp->hasAttr(kSplittedIf)) {
       rearrangeIfOp(ifOp, memGraph);
-      ifOp->removeAttr(kSplittedIf);
     }
   });
 
