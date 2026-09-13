@@ -814,6 +814,7 @@ void DataDependencyAnalysisPass::analyzeExternalOutputs(
           for (unsigned i = 0; i < user->getNumOperands(); ++i) {
             if (user->getOperand(i) == output) {
               outputIndex = i;
+
               break;
             }
           }
