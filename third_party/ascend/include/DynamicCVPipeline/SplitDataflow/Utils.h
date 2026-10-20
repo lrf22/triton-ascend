@@ -23,6 +23,7 @@
 #ifndef TRITON_ADAPTER_SPLIT_DATAFLOW_UTILS_H
 #define TRITON_ADAPTER_SPLIT_DATAFLOW_UTILS_H
 
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Operation.h"
 #include "llvm/ADT/StringRef.h"
 
@@ -31,6 +32,11 @@ namespace triton {
 
 void setOpBlockId(mlir::Operation *op, int blockId);
 void setOpCoreType(mlir::Operation *op, llvm::StringRef coreType);
+int getOpInLoop(mlir::Operation *op);
+int getOpLoopRegion(mlir::Operation *op);
+std::pair<int, int> getIdLoopInfo(int blockId, mlir::ModuleOp module);
+void setOpInLoop(mlir::Operation *op);
+void setOpLoopRegion(mlir::Operation *op, int loopRegion);
 bool isScalarDependency(mlir::Value depValue);
 bool is1DTensorDependency(mlir::Value depValue);
 

@@ -1160,6 +1160,221 @@ void DataDependencyAnalysisPass::deduplicateDependencies(
   dependencies.erase(newEnd, dependencies.end());
 }
 
+void DataDependencyAnalysisPass::analyzeDepLoopInfo(DataDependencyInfo &info) {
+  int loopRegion = 1;
+  module->walk<mlir::WalkOrder::PreOrder>([&](mlir::Operation *op) {
+    if (!mlir::isa<scf::ForOp, scf::WhileOp>(op)) {
+      return;
+    }
+    for (mlir::Region &region : op->getRegions()) {
+      region.walk([loopRegion](mlir::Operation *bodyOp) {
+        setOpInLoop(bodyOp);
+        setOpLoopRegion(bodyOp, loopRegion);
+      });
+    }
+    loopRegion++;
+  });
+
+  auto setProducerLoopDepth = [&](llvm::SmallVector<DependencyInfo> &deps) {
+    for (auto &dep : deps) {
+      std::tie(dep.in_loop, dep.loop_region) =
+          getIdLoopInfo(dep.producerBlockId, module);
+    }
+  };
+  setProducerLoopDepth(info.getV2CDependencies());
+  setProducerLoopDepth(info.getC2VDependencies());
+  setProducerLoopDepth(info.getMemoryDependencies());
+}
+
+// Assign flag_ids by reusing those from the dominant loop region.
+//
+// Rules:
+// - Group dependencies by in_loop.
+// - Within each in_loop group, group by loop_region.
+// - Select the loop_region with the most dependencies as the master region.
+// - Dependencies in the master region keep their original flag_id.
+// - Their reuseStartEnd is set to false.
+// - Dependencies in other loop_regions reuse the master region's flag_ids.
+// - Reuse is done in round-robin order over the master region's unique
+// flag_ids.
+// - Reused dependencies have reuseStartEnd set to true.
+// - If multiple loop_regions tie for the largest size, the first one is chosen.
+//
+// Example (in_loop = 1):
+//   loop_region=1: dep1(flag_id=1), dep2(flag_id=2)   -> master region
+//   loop_region=2: dep3, dep4                         -> flag_id=1, 2;
+//   reuseStartEnd=true loop_region=5: dep5                               ->
+//   flag_id=1; reuseStartEnd=true
+void DataDependencyAnalysisPass::assignDepFlagIds(
+    llvm::SmallVector<DependencyInfo> &deps) {
+  // 1. Group by in_loop
+  llvm::DenseMap<int, llvm::SmallVector<DependencyInfo *>> inLoopGroups;
+  for (auto &dep : deps) {
+    inLoopGroups[dep.in_loop].push_back(&dep);
+  }
+
+  for (auto &[inLoop, depList] : inLoopGroups) {
+    if (depList.empty())
+      continue;
+
+    // 2. Group by loop_region within the same in_loop
+    llvm::DenseMap<int, llvm::SmallVector<DependencyInfo *>> regionGroups;
+    for (auto *dep : depList) {
+      regionGroups[dep->loop_region].push_back(dep);
+    }
+
+    // 3. Find the loop_region with the most deps
+    auto it = regionGroups.begin();
+    int maxRegion = it->first;
+    size_t maxSize = it->second.size();
+    ++it;
+
+    for (; it != regionGroups.end(); ++it) {
+      size_t curSize = it->second.size();
+      if (curSize > maxSize) {
+        maxRegion = it->first;
+        maxSize = curSize;
+      }
+    }
+
+    // 4. Collect unique flag_ids from the master region
+    llvm::SmallVector<int> masterFlags;
+    llvm::DenseSet<int> seen;
+    for (auto *dep : regionGroups[maxRegion]) {
+      if (seen.insert(dep->flag_id).second) {
+        masterFlags.push_back(dep->flag_id);
+      }
+    }
+
+    if (masterFlags.empty())
+      continue;
+
+    // 5. Keep master region unchanged, reuse flag_ids for others
+    for (auto &[region, group] : regionGroups) {
+      if (region == maxRegion) {
+        for (auto *dep : group) {
+          dep->reuseStartEnd = false;
+        }
+        continue;
+      }
+
+      size_t idx = 0;
+      for (auto *dep : group) {
+        dep->flag_id = masterFlags[idx % masterFlags.size()];
+        dep->reuseStartEnd = true;
+        ++idx;
+      }
+    }
+  }
+}
+
+// Remap flag_ids to a continuous range starting from 0.
+//
+// Rules:
+// - Scan all dependencies from all lists.
+// - Assign a new sequential id to each distinct original flag_id.
+// - New ids start from 0 and increase without gaps.
+// - All dependencies sharing the same original flag_id get the same new id.
+// - reuseStartEnd is not changed.
+//
+// Example:
+//   Before: 1, 1, 3, 5, 7
+//   After:  0, 0, 1, 2, 3
+void remapFlagIdsToContinuous(
+    llvm::SmallVector<llvm::SmallVector<DependencyInfo> *> &depLists) {
+  llvm::DenseMap<int, int> idMap;
+  int nextId = 0;
+
+  for (auto *list : depLists) {
+    for (auto &dep : *list) {
+      auto it = idMap.find(dep.flag_id);
+      if (it == idMap.end()) {
+        idMap[dep.flag_id] = nextId;
+        dep.flag_id = nextId;
+        ++nextId;
+      } else {
+        dep.flag_id = it->second;
+      }
+    }
+  }
+}
+
+void DataDependencyAnalysisPass::analyzeSyncReuse(DataDependencyInfo &info) {
+  int flag_id = 0;
+  for (auto &dep : info.getV2CDependencies()) {
+    dep.flag_id = flag_id;
+    flag_id++;
+  }
+  for (auto &dep : info.getC2VDependencies()) {
+    dep.flag_id = flag_id;
+    flag_id++;
+  }
+  for (auto &dep : info.getMemoryDependencies()) {
+    dep.flag_id = flag_id;
+    flag_id++;
+  }
+
+  assignDepFlagIds(info.getV2CDependencies());
+  assignDepFlagIds(info.getC2VDependencies());
+  assignDepFlagIds(info.getMemoryDependencies());
+
+  llvm::SmallVector<llvm::SmallVector<DependencyInfo> *> depLists;
+  depLists.push_back(&info.getV2CDependencies());
+  depLists.push_back(&info.getC2VDependencies());
+  depLists.push_back(&info.getMemoryDependencies());
+
+  remapFlagIdsToContinuous(depLists);
+}
+
+void DataDependencyAnalysisPass::sortDependencies(
+    llvm::SmallVector<DependencyInfo> &dependencies, mlir::ModuleOp module) {
+  if (dependencies.size() <= 1) {
+    return;
+  }
+
+  // Step 1: Walk the entire module and assign a monotonically increasing order
+  //         to each operation, representing its position in the IR.
+  llvm::DenseMap<mlir::Operation *, unsigned> opOrder;
+  unsigned order = 0;
+  module.walk<WalkOrder::PreOrder>(
+      [&](mlir::Operation *op) { opOrder[op] = order++; });
+
+  // Step 2: Helper lambda — get the earliest user op of dep.value within the
+  //         consumer compute block.
+  auto getFirstConsumerOp =
+      [&](const DependencyInfo &dep) -> mlir::Operation * {
+    mlir::Operation *firstConsumer = nullptr;
+    unsigned firstOrder = std::numeric_limits<unsigned>::max();
+    for (auto *user : dep.value.getUsers()) {
+      auto userBlockIdOpt = CVPipeline::getOpBlockId(user);
+      if (userBlockIdOpt && *userBlockIdOpt == dep.consumerBlockId) {
+        auto it = opOrder.find(user);
+        if (it != opOrder.end() && it->second < firstOrder) {
+          firstOrder = it->second;
+          firstConsumer = user;
+        }
+      }
+    }
+    return firstConsumer;
+  };
+
+  // Step 3: Sort
+  std::sort(dependencies.begin(), dependencies.end(),
+            [&](const DependencyInfo &a, const DependencyInfo &b) {
+              // the dependency whose consumer op appears earlier comes first.
+              auto *aConsOp = getFirstConsumerOp(a);
+              auto *bConsOp = getFirstConsumerOp(b);
+              if (aConsOp && bConsOp) {
+                unsigned aConsOpOrder = opOrder.lookup(aConsOp);
+                unsigned bConsOpOrder = opOrder.lookup(bConsOp);
+                if (aConsOpOrder != bConsOpOrder) {
+                  return aConsOpOrder < bConsOpOrder;
+                }
+              }
+              return false;
+            });
+}
+
 void DataDependencyAnalysisPass::runOnOperation() {
   LOG_DEBUG("\n--- enter DataDependencyAnalysisPass --->\n");
   module = getOperation();
@@ -1198,6 +1413,13 @@ void DataDependencyAnalysisPass::runOnOperation() {
   deduplicateDependencies(info.getC2VDependencies());
   deduplicateDependencies(info.getC2CDependencies());
   deduplicateDependencies(info.getMemoryDependencies());
+  sortDependencies(info.getV2CDependencies(), module);
+  sortDependencies(info.getC2VDependencies(), module);
+  sortDependencies(info.getC2CDependencies(), module);
+  sortDependencies(info.getMemoryDependencies(), module);
+
+  analyzeDepLoopInfo(info);
+  analyzeSyncReuse(info);
 
   info.setValid(true);
 

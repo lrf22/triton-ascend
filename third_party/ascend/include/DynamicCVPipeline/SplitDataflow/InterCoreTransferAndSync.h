@@ -110,8 +110,8 @@ private:
   llvm::DenseMap<mlir::Value, mlir::Value> ndnzValueMapping;
   SSBufferManager ssbufferManager;
 
-  void analyzeLoopInclusion();
-  void moveStartEndSync(mlir::OpBuilder &builder);
+  Operation *loopStartBound = nullptr;
+  Operation *loopEndBound = nullptr;
 
   mlir::LogicalResult
   processDependencies(FlagIdManager &flagManager,
@@ -133,6 +133,7 @@ private:
 
   std::pair<mlir::Operation *, mlir::Operation *>
   getBlockStartEnd(int blockId, mlir::ModuleOp module);
+  void findLoopRange(ModuleOp module);
   std::pair<mlir::Operation *, mlir::Operation *>
   getSubBlockStartEnd(mlir::Operation *defOp);
   bool
@@ -193,18 +194,12 @@ private:
   TransferPipeConfig getTransferPipeConfig(Operation *transferOp,
                                            bool isStoreDirectly = false);
   void insertInterCoreSync(mlir::OpBuilder &builder,
-                           mlir::Operation *transferOp,
-                           mlir::Operation *consumerStartOp,
-                           mlir::Operation *consumerEndOp, int flag,
-                           mlir::Location loc, int transferIndex,
+                           mlir::Operation *transferOp, DependencyInfo &dep,
+                           int flag, mlir::Location loc, int transferIndex,
                            FlagIdReuseManager &flagIdReuseManager,
                            mlir::Operation *consumedDataOp = nullptr,
                            bool isStoreDirectly = false);
-  void insertMemDepSync(mlir::OpBuilder &builder,
-                        mlir::Operation *producerStartOp,
-                        mlir::Operation *producerEndOp,
-                        mlir::Operation *consumerStartOp,
-                        mlir::Operation *consumerEndOp, int flag,
+  void insertMemDepSync(mlir::OpBuilder &builder, DependencyInfo &dep, int flag,
                         mlir::Location loc, bool isCubeToVector,
                         FlagIdReuseManager &flagIdReuseManager);
   // Match the CUBE -> VECTOR direct-store pattern inside the given SCF op:
@@ -222,8 +217,6 @@ private:
   // Remove VECTOR add-from-matmul pseudo-ops so the SCF yield points at the
   // real data source.
   void removeVectorPseudoOps();
-  void sortDependencies(llvm::SmallVector<DependencyInfo> &dependencies,
-                        mlir::ModuleOp module);
   llvm::SmallVector<mlir::Operation *>
   insertAnalyzeFlagRelations(mlir::ModuleOp module,
                              FlagIdReuseManager &flagIdReuseManager);

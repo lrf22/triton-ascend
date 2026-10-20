@@ -69,6 +69,18 @@ struct DependencyInfo {
   mlir::Operation *consumerYieldOp = nullptr;
 
   mlir::OpOperand *operand = nullptr;
+
+  int in_loop;
+  int loop_region;
+
+  bool sync = false;
+  int flag_id;
+  bool reuseStartEnd = false;
+
+  mlir::Operation *prodStart = nullptr;
+  mlir::Operation *prodEnd = nullptr;
+  mlir::Operation *consStart = nullptr;
+  mlir::Operation *consEnd = nullptr;
 };
 
 class DataDependencyInfo {
@@ -195,6 +207,11 @@ private:
   void updateCoreTypeAtIndex(Operation *op, int index,
                              llvm::StringRef newCoreType);
   void deduplicateDependencies(llvm::SmallVector<DependencyInfo> &dependencies);
+  void sortDependencies(llvm::SmallVector<DependencyInfo> &dependencies,
+                        mlir::ModuleOp module);
+  void analyzeDepLoopInfo(DataDependencyInfo &info);
+  void assignDepFlagIds(llvm::SmallVector<DependencyInfo> &deps);
+  void analyzeSyncReuse(DataDependencyInfo &info);
   mlir::ModuleOp module;
 };
 

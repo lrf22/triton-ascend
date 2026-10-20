@@ -24,6 +24,7 @@
 #include "ascend/include/DynamicCVPipeline/SplitDataflow/Utils.h"
 #include "ascend/include/DynamicCVPipeline/Common/Utils.h"
 
+#include "mlir/IR/BuiltinOps.h"
 #include "mlir/IR/Operation.h"
 #include "llvm/ADT/StringRef.h"
 
@@ -36,6 +37,61 @@ void triton::setOpBlockId(mlir::Operation *op, int blockId) {
       CVPipeline::kBlockId,
       IntegerAttr::get(IntegerType::get(op->getContext(), kIntegerBitWidth),
                        blockId));
+}
+
+int triton::getOpInLoop(mlir::Operation *op) {
+  if (op->hasAttr(CVPipeline::kInLoopAttr)) {
+    auto inLoopAttr = op->getAttrOfType<IntegerAttr>(CVPipeline::kInLoopAttr);
+    return inLoopAttr.getInt();
+  }
+  return 0; // Not in a loop
+}
+
+int triton::getOpLoopRegion(mlir::Operation *op) {
+  if (op->hasAttr(CVPipeline::kLoopRegionAttr)) {
+    auto loopRegionAttr =
+        op->getAttrOfType<IntegerAttr>(CVPipeline::kLoopRegionAttr);
+    return loopRegionAttr.getInt();
+  }
+  return 0; // Not in a loop region
+}
+
+std::pair<int, int> triton::getIdLoopInfo(int blockId, mlir::ModuleOp module) {
+  int inLoop = 0;
+  int loopRegion = 0;
+  module.walk<WalkOrder::PreOrder>([&](mlir::Operation *op) -> WalkResult {
+    if (CVPipeline::getOpBlockId(op) == blockId) {
+      inLoop = getOpInLoop(op);
+      loopRegion = getOpLoopRegion(op);
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+
+  return {inLoop, loopRegion};
+}
+
+void triton::setOpInLoop(mlir::Operation *op) {
+  static constexpr int kIntegerBitWidth = 32;
+  if (op->hasAttr(CVPipeline::kInLoopAttr)) {
+    int inLoop = getOpInLoop(op);
+    op->setAttr(
+        CVPipeline::kInLoopAttr,
+        IntegerAttr::get(IntegerType::get(op->getContext(), kIntegerBitWidth),
+                         inLoop + 1));
+  } else {
+    op->setAttr(CVPipeline::kInLoopAttr,
+                IntegerAttr::get(
+                    IntegerType::get(op->getContext(), kIntegerBitWidth), 1));
+  }
+}
+
+void triton::setOpLoopRegion(mlir::Operation *op, int loopRegion) {
+  static constexpr int kIntegerBitWidth = 32;
+  op->setAttr(
+      CVPipeline::kLoopRegionAttr,
+      IntegerAttr::get(IntegerType::get(op->getContext(), kIntegerBitWidth),
+                       loopRegion));
 }
 
 void triton::setOpCoreType(mlir::Operation *op, llvm::StringRef coreType) {
