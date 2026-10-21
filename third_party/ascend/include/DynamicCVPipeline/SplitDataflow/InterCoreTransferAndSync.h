@@ -171,9 +171,11 @@ private:
   mlir::Operation *analyzeConsumerReadInsertPoint(Value srcValue,
                                                   int iniConsumerId);
   mlir::Operation *getConsumerWaitPoint(int transferIndex);
+  mlir::Operation *findLastMatmulUser(int transferIndex);
   mlir::Operation *getCopyPointBeforeStore(Value depValue,
                                            Operation *vectorEndOp,
                                            int iniProducerBlockId);
+  Operation *findConsumerSetPoint(int transferIndex, int consumerBlockId, mlir::Operation *consEndPoint);
   mlir::Operation *getFixpipePointAfterProducer(Value depValue,
                                                 int iniProducerBlockId);
   linalg::MatmulOp findYieldMatmulInSplitIf(Value splittedIfResult);

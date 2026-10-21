@@ -1663,6 +1663,50 @@ void InterCoreTransferAndSyncPass::AnalyzeSplittedIf(DependencyInfo &dep) {
   }
 }
 
+Operation *InterCoreTransferAndSyncPass::findConsumerSetPoint(int transferIndex, int consumerBlockId, mlir::Operation *consEndPoint) {
+  LOG_DEBUG("findConsumerSetPoint for block: " << consumerBlockId << "\n");
+  bufferization::ToTensorOp toTensorOp = nullptr;
+  module->walk([&](bufferization::ToTensorOp op) {
+    if (!op->hasAttr(CVPipeline::kTransferId)) {
+      return WalkResult::advance();
+    }
+    if (op->getAttrOfType<IntegerAttr>(CVPipeline::kTransferId).getInt() == transferIndex) {
+      toTensorOp = op;
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+  if (!toTensorOp)
+    return nullptr;
+
+  llvm::DenseSet<mlir::Operation *> consumerOps;
+  for (Operation *user : toTensorOp->getResult(0).getUsers()) {
+    auto userBlockIdOpt = CVPipeline::getOpBlockId(user);
+    if (userBlockIdOpt && *userBlockIdOpt == consumerBlockId) {
+      consumerOps.insert(user);
+    }
+  }
+
+  Operation *curr = consEndPoint;
+  Operation *firstSyncOpAfterConsumer = nullptr;
+  while (curr) {
+    auto blockIdOpt = CVPipeline::getOpBlockId(curr);
+    if (blockIdOpt != consumerBlockId) {
+      break;
+    }
+    if (consumerOps.contains(curr)) {
+      break;
+    }
+    if (isa<hivm::SyncBlockSetOp, hivm::SyncBlockWaitOp, hivm::CopyOp, hivm::FixpipeOp>(curr)) {
+      firstSyncOpAfterConsumer = curr->getPrevNode();
+      LOG_DEBUG("firstSyncOpAfterConsumer: " << *firstSyncOpAfterConsumer
+                                              << "\n");
+    }
+    curr = curr->getPrevNode();
+  }
+  return firstSyncOpAfterConsumer;
+}
+
 // V->C Transfer Logic
 LogicalResult InterCoreTransferAndSyncPass::handleVectorToCube(
     OpBuilder &builder, DependencyInfo &dep, FlagIdManager &flagManager,
@@ -1717,6 +1761,13 @@ LogicalResult InterCoreTransferAndSyncPass::handleVectorToCube(
     if (newconsumerPoint &&
         newConsStart->getBlock() == newconsumerPoint->getBlock()) {
       newConsStart = newconsumerPoint;
+    }
+  }
+
+  if (dep.consumerBlockId == dep.iniConsumerBlockId) {
+    Operation *firstSyncOpAfterConsumer = findConsumerSetPoint(transferIndex, dep.iniConsumerBlockId, newConsEnd);
+    if (firstSyncOpAfterConsumer && newConsEnd->getBlock() == firstSyncOpAfterConsumer->getBlock()) {
+      newConsEnd = firstSyncOpAfterConsumer;
     }
   }
 
@@ -1807,6 +1858,12 @@ LogicalResult InterCoreTransferAndSyncPass::handleCubeToVector(
     if (newconsumerPoint && yieldBeforeOp) {
       newConsStart = newconsumerPoint;
       newConsEnd = yieldBeforeOp;
+    }
+  }
+  if (dep.consumerBlockId == dep.iniConsumerBlockId) {
+    Operation *firstSyncOpAfterConsumer = findConsumerSetPoint(transferIndex, dep.iniConsumerBlockId, newConsEnd);
+    if (firstSyncOpAfterConsumer && newConsEnd->getBlock() == firstSyncOpAfterConsumer->getBlock()) {
+      newConsEnd = firstSyncOpAfterConsumer;
     }
   }
   insertInterCoreSync(builder, transferOp, newConsStart, newConsEnd, flagId,
@@ -2335,41 +2392,6 @@ LogicalResult InterCoreTransferAndSyncPass::processDependencies(
     analyzeLoopInclusion();
   }
 
-  llvm::SmallVector<DependencyInfo> &V2CDependencies =
-      info.getV2CDependencies();
-  sortDependencies(V2CDependencies, module);
-  LOG_DEBUG("[DEBUG] V2CDependencies size: " << V2CDependencies.size() << "\n");
-  for (size_t i = 0; i < V2CDependencies.size(); ++i) {
-    auto &dep = V2CDependencies[i];
-    LOG_DEBUG("[V2C-" << i << "] producerBlockId = " << dep.producerBlockId
-                      << ", consumerBlockId = " << dep.consumerBlockId
-                      << ", iniProducerBlockId = " << dep.iniProducerBlockId
-                      << ", iniConsumerBlockId = " << dep.iniConsumerBlockId
-                      << ", value = " << dep.value << "\n");
-  }
-  LOG_DEBUG("Step 1: Handle V->C dependencies\n");
-  // Step 1: Handle V->C dependencies
-  for (auto &dep : V2CDependencies) {
-    if (!isScalarDependency(dep.value) && !is1DTensorDependency(dep.value)) {
-      Location loc = dep.value.getLoc();
-      Nd2NzNormalize(builder, dep, loc);
-    }
-  }
-
-  for (auto &dep : V2CDependencies) {
-    LOG_DEBUG("[V->C] producerBlockId = " << dep.producerBlockId
-                                          << ", consumerBlockId = "
-                                          << dep.consumerBlockId << "\n");
-    if (failed(handleVectorToCube(builder, dep, flagManager,
-                                  flagIdReuseManager))) {
-      LOG_DEBUG("[ERROR] V->C failed! producerBlockId = "
-                << dep.producerBlockId
-                << ", consumerBlockId = " << dep.consumerBlockId << "\n");
-      return failure();
-    }
-  }
-  LOG_DEBUG("Completed V->C transfers and syncs.\n");
-
   llvm::SmallVector<DependencyInfo> &C2VDependencies =
       info.getC2VDependencies();
   sortDependencies(C2VDependencies, module);
@@ -2441,6 +2463,41 @@ LogicalResult InterCoreTransferAndSyncPass::processDependencies(
     }
   }
   LOG_DEBUG("Completed C->C transfers and syncs.\n");
+
+  llvm::SmallVector<DependencyInfo> &V2CDependencies =
+      info.getV2CDependencies();
+  sortDependencies(V2CDependencies, module);
+  LOG_DEBUG("[DEBUG] V2CDependencies size: " << V2CDependencies.size() << "\n");
+  for (size_t i = 0; i < V2CDependencies.size(); ++i) {
+    auto &dep = V2CDependencies[i];
+    LOG_DEBUG("[V2C-" << i << "] producerBlockId = " << dep.producerBlockId
+                      << ", consumerBlockId = " << dep.consumerBlockId
+                      << ", iniProducerBlockId = " << dep.iniProducerBlockId
+                      << ", iniConsumerBlockId = " << dep.iniConsumerBlockId
+                      << ", value = " << dep.value << "\n");
+  }
+  LOG_DEBUG("Step 1: Handle V->C dependencies\n");
+  // Step 1: Handle V->C dependencies
+  for (auto &dep : V2CDependencies) {
+    if (!isScalarDependency(dep.value) && !is1DTensorDependency(dep.value)) {
+      Location loc = dep.value.getLoc();
+      Nd2NzNormalize(builder, dep, loc);
+    }
+  }
+
+  for (auto &dep : V2CDependencies) {
+    LOG_DEBUG("[V->C] producerBlockId = " << dep.producerBlockId
+                                          << ", consumerBlockId = "
+                                          << dep.consumerBlockId << "\n");
+    if (failed(handleVectorToCube(builder, dep, flagManager,
+                                  flagIdReuseManager))) {
+      LOG_DEBUG("[ERROR] V->C failed! producerBlockId = "
+                << dep.producerBlockId
+                << ", consumerBlockId = " << dep.consumerBlockId << "\n");
+      return failure();
+    }
+  }
+  LOG_DEBUG("Completed V->C transfers and syncs.\n");
 
   llvm::SmallVector<DependencyInfo> &memDependencies =
       info.getMemoryDependencies();
