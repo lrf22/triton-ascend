@@ -171,3 +171,113 @@ void mlir::triton::analyzeSyncReuse(DataDependencyInfo &info) {
   depLists.push_back(&info.getMemoryDependencies());
   remapFlagIdsToContinuous(depLists);
 }
+
+
+
+/// 冗余边分析模块。
+///
+/// 使用 DenseMap + SmallVector 存储有向图，并提供统一的 addEdge 接口，
+/// 方便后续扩展其他类型的边。
+class RedundantEdgeAnalyzer {
+public:
+  using Graph = llvm::DenseMap<int, llvm::SmallVector<int>>;
+
+  /// 添加一条有向边 from -> to。
+  void addEdge(int from, int to) {
+    graph_[from].push_back(to);
+  }
+
+  /// 根据 IR 中计算块的物理顺序构建隐式边。
+  ///
+  /// 相邻且类型相同的计算块之间存在隐式执行顺序保证。
+  void buildImplicitEdges(DataDependencyInfo &info, ModuleOp module) {
+    llvm::SmallVector<int> cubeBlockIds;
+    llvm::SmallVector<int> vectorBlockIds;
+    llvm::DenseSet<int> seenBlockIds;
+    auto &blockInfoMap = info.getBlockInfoMap();
+
+    module.walk([&](Operation *op) {
+      auto blockId = CVPipeline::getOpBlockId(op);
+      if (!blockId || !seenBlockIds.insert(*blockId).second) {
+        return;
+      }
+      auto coreType = CVPipeline::getCoreType(op);
+      //有可能存在同时是cube和vector的情况
+    });
+
+    auto connectAdjacentBlocks = [&](llvm::ArrayRef<int> blockIds) {
+      for (size_t i = 1; i < blockIds.size(); ++i) {
+        addEdge(blockIds[i - 1], blockIds[i]);
+      }
+    };
+    connectAdjacentBlocks(cubeBlockIds);
+    connectAdjacentBlocks(vectorBlockIds);
+  }
+
+  /// 分析依赖列表，标记每条依赖是否需要插入同步点。
+  ///
+  /// 对每条显式依赖边 u -> v，如果存在长度大于等于 2 的替代路径，
+  /// 则认为该边冗余，sync = false；否则 sync = true。
+  void analyzeAndMark(llvm::SmallVectorImpl<DependencyInfo> &dependencies) {
+    for (auto &dep : dependencies) {
+      int u = dep.producerBlockId;
+      int v = dep.consumerBlockId;
+
+      // 临时加入当前显式边，供 BFS 使用。
+      addEdge(u, v);
+
+      if (hasAlternativePath(u, v)) {
+        dep.sync = false;
+      } else {
+        dep.sync = true;
+      }
+
+      // 分析完立即移除，避免影响后续依赖的独立判断。
+      graph_[u].pop_back();
+    }
+  }
+
+  /// 重置图结构，支持多轮分析。
+  void reset() {
+    graph_.clear();
+  }
+
+private:
+  Graph graph_;
+
+  /// 检查是否存在从 start 到 end 的替代路径，且路径长度 >= 2。
+  bool hasAlternativePath(int start, int end) {
+    if (start == end)
+      return false;
+
+    llvm::SmallVector<int, 8> worklist;
+    llvm::DenseMap<int, bool> visited;
+
+    worklist.push_back(start);
+    visited[start] = true;
+
+    while (!worklist.empty()) {
+      int current = worklist.pop_back_val();
+
+      auto it = graph_.find(current);
+      if (it == graph_.end())
+        continue;
+
+      for (int neighbor : it->second) {
+        if (neighbor == end) {
+          // 如果前驱不是起点，说明路径长度 >= 2。
+          if (current != start)
+            return true;
+          // current == start 表示直接边 start -> end，继续搜索其他路径。
+        } else {
+          if (!visited.contains(neighbor)) {
+            visited[neighbor] = true;
+            worklist.push_back(neighbor);
+          }
+        }
+      }
+    }
+
+    return false;
+  }
+};

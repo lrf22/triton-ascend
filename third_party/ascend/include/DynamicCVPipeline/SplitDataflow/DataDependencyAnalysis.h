@@ -75,6 +75,7 @@ struct DependencyInfo {
 
   int flagId;
   bool reuseStartEnd = false;
+  bool sync = true;
 };
 
 class DataDependencyInfo {
