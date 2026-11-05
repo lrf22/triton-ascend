@@ -391,16 +391,26 @@ void InterCoreTransferAndSyncPass::findLoopRange(ModuleOp module) {
   auto latestAncestors = collectAncestorChain(latestLoop);
 
   Operation *commonAncestor = nullptr;
-  for (Operation *current = latestLoop; current;
-       current = current->getParentOp()) {
+  for (Operation *current : latestAncestors) {
     if (isa<scf::ForOp, scf::WhileOp>(current)) {
       continue;
     }
-    if (std::find(earliestAncestors.begin(), earliestAncestors.end(),
-                  current) != earliestAncestors.end()) {
-      commonAncestor = current;
-      break;
+    auto earliestIt =
+        std::find(earliestAncestors.begin(), earliestAncestors.end(), current);
+    auto latestIt =
+        std::find(latestAncestors.begin(), latestAncestors.end(), current);
+    if (earliestIt == earliestAncestors.end() ||
+        latestIt == latestAncestors.end()) {
+      continue;
     }
+    if (earliestIt != earliestAncestors.begin() &&
+        latestIt != latestAncestors.begin() &&
+        (*(earliestIt - 1))->getParentRegion() !=
+            (*(latestIt - 1))->getParentRegion()) {
+      continue;
+    }
+    commonAncestor = current;
+    break;
   }
 
   if (!commonAncestor) {
@@ -415,6 +425,7 @@ void InterCoreTransferAndSyncPass::findLoopRange(ModuleOp module) {
     }
     return *(it - 1);
   };
+  LOG_DEBUG("commonAncestor: " << *commonAncestor << "\n");
   loopStartBound = getSameLevelBound(earliestAncestors, commonAncestor);
   loopEndBound = getSameLevelBound(latestAncestors, commonAncestor);
   return;
