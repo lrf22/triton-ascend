@@ -35,17 +35,23 @@ static constexpr const char *DEBUG_TYPE = "sync-analysis";
 using namespace mlir;
 using namespace mlir::triton;
 
-void mlir::triton::analyzeDepLoopInfo(DataDependencyInfo &info,
+void mlir::triton::analyzeDepLoopInfo(ModuleOp module,
                                       DependencyInfo &dep) {
-  auto blockInfoIt = info.getBlockInfoMap().find(dep.producerBlockId);
-  if (blockInfoIt == info.getBlockInfoMap().end() ||
-      blockInfoIt->second.Operations.empty()) {
+  mlir::Operation *producerBlockOp = nullptr;
+  module.walk<WalkOrder::PreOrder>([&](Operation *op) {
+    if (CVPipeline::getOpBlockId(op) == dep.producerBlockId) {
+      producerBlockOp = op;
+      return WalkResult::interrupt();
+    }
+    return WalkResult::advance();
+  });
+
+  if (!producerBlockOp) {
     LOG_DEBUG("Producer block info is missing for dependency block "
               << dep.producerBlockId << "\n");
     return;
   }
 
-  auto producerBlockOp = blockInfoIt->second.Operations.front();
   for (Operation *parent = producerBlockOp->getParentOp(); parent;
        parent = parent->getParentOp()) {
     if (isa<scf::ForOp, scf::WhileOp>(parent)) {
