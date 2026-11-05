@@ -1258,7 +1258,7 @@ void DataDependencyAnalysisPass::runOnOperation() {
   sortDependencies(info.getC2VDependencies(), module);
   sortDependencies(info.getC2CDependencies(), module);
   sortDependencies(info.getIntraC2CDependencies(), module);
-  analyzeSyncReuse(info);
+  analyzeSyncReuse(info, module);
 
   info.setValid(true);
 

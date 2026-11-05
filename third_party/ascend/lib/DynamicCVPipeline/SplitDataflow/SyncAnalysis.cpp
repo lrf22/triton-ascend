@@ -155,7 +155,7 @@ void remapFlagIdsToContinuous(
 
 } // namespace
 
-void mlir::triton::analyzeSyncReuse(DataDependencyInfo &info) {
+void mlir::triton::analyzeSyncReuse(DataDependencyInfo &info, ModuleOp module) {
   int flag_id = 0;
   for (auto &dep : info.getV2CDependencies()) {
     dep.flagId = flag_id++;
@@ -165,6 +165,10 @@ void mlir::triton::analyzeSyncReuse(DataDependencyInfo &info) {
   }
   for (auto &dep : info.getMemoryDependencies()) {
     dep.flagId = flag_id++;
+  }
+
+  if (isOutlineReuseBlacklistKernel(module)) {
+    return;
   }
 
   assignDepFlagIds(info.getV2CDependencies());

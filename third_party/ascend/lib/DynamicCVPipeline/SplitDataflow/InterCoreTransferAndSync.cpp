@@ -1250,6 +1250,12 @@ void InterCoreTransferAndSyncPass::insertInterCoreSync(
     if (auto subBlockId = getSubBlockId(insertPoint.prodEnd)) {
       CVPipeline::setSubBlockId(setOpForWrite, *subBlockId);
     }
+    
+    if (isOutlineReuseBlacklistKernel(module)) {
+      Operation *mainLoopOp = findMainLoopforTransfer(transferOp, insertPoint.consStart);
+      loopStartBound = mainLoopOp;
+      loopEndBound = mainLoopOp;
+    }
 
     if (!dep.reuseStartEnd) {
       builder.setInsertionPoint(loopStartBound);
